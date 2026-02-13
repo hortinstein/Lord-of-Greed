@@ -165,8 +165,11 @@ def build_rows(groups: list[dict], sorcery_lookup: dict) -> list[dict]:
                 variant = sorcery_lookup.get(key, {})
 
                 rarity = variant.get("rarity") or tcg_rarity
-                slug = variant.get("slug", "")
-                art_link = slug  # slug doubles as the art identifier
+
+                # Build the actual TCGPlayer product URL
+                product_url = product.get("url", "")
+                if not product_url and pid:
+                    product_url = f"https://www.tcgplayer.com/product/{pid}"
 
                 rows.append({
                     "name": card_name,
@@ -174,7 +177,7 @@ def build_rows(groups: list[dict], sorcery_lookup: dict) -> list[dict]:
                     "expansion": group_name,
                     "finish": finish,
                     "rarity": rarity,
-                    "art_link": art_link,
+                    "art_link": product_url,
                 })
 
     return rows
