@@ -21,8 +21,8 @@ Notes:
   - Sealed prices are pulled from rows whose name contains "booster" + (pack|box|case).
 
 Example:
-  python sorcery_ev_calc.py /path/to/sorcery_prices.csv --out ev_table.csv
-  python sorcery_ev_calc.py /path/to/sorcery_prices.csv --prev /path/to/previous_prices.csv
+  python sorcery_ev_calc.py 20260213_0132_sorcery_prices.csv
+  python sorcery_ev_calc.py 20260213_0132_sorcery_prices.csv --prev 20260212_1400_sorcery_prices.csv
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, Optional
 
 import numpy as np
@@ -365,8 +366,6 @@ def print_interesting_stats(df: pd.DataFrame) -> None:
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description="Compute rough Sorcery EV by set using a community-odds model.")
     p.add_argument("csv", help="Path to sorcery_prices CSV")
-    p.add_argument("--out", help="Optional path to write EV output CSV")
-    p.add_argument("--changes-out", help="Optional path to write price changes CSV")
     p.add_argument("--prev", help="Path to previous sorcery_prices CSV (auto-detected if omitted)")
     p.add_argument("--top-n", type=int, default=20, help="Number of biggest movers to show (default: 20)")
     p.add_argument("--include-sets-without-box-price", action="store_true", help="Include sets even if no box price found in CSV")
@@ -395,6 +394,12 @@ def main(argv: list[str]) -> int:
 
     df = pd.read_csv(args.csv)
 
+    # Timestamped output filenames — never overwrite old data
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    out_dir = os.path.dirname(os.path.abspath(args.csv)) or "."
+    ev_out = os.path.join(out_dir, f"{timestamp}_ev_table.csv")
+    changes_out = os.path.join(out_dir, f"{timestamp}_changes.csv")
+
     # ── EV Table ──────────────────────────────────────────────────────
     out = compute_ev_table(df, odds, require_box_price=not args.include_sets_without_box_price)
 
@@ -407,9 +412,8 @@ def main(argv: list[str]) -> int:
     cols = [c for c in cols if c in show.columns]
     print(show[cols].to_string(index=False))
 
-    if args.out:
-        out.to_csv(args.out, index=False)
-        print(f"\nWrote EV table: {args.out}")
+    out.to_csv(ev_out, index=False)
+    print(f"\nWrote EV table: {ev_out}")
 
     # ── Biggest changes since last run ────────────────────────────────
     prev_csv = args.prev
@@ -422,9 +426,8 @@ def main(argv: list[str]) -> int:
         changes = compute_price_changes(df, prev_df, top_n=args.top_n)
         print_changes_report(changes)
 
-        if args.changes_out:
-            changes.to_csv(args.changes_out, index=False)
-            print(f"Wrote changes: {args.changes_out}")
+        changes.to_csv(changes_out, index=False)
+        print(f"Wrote changes: {changes_out}")
     else:
         print("\nNo previous CSV found for comparison. Run the scraper again later to see price changes.")
 
