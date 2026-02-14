@@ -7,6 +7,7 @@ name, price, expansion, finish, rarity, art_link
 """
 
 import csv
+import os
 import re
 import sys
 import unicodedata
@@ -17,7 +18,12 @@ import requests
 
 SORCERY_API_URL = "https://api.sorcerytcg.com/api/cards"
 TCGCSV_BASE = "https://tcgcsv.com/tcgplayer/77"
-OUTPUT_FILE = f"{datetime.now().strftime('%Y%m%d_%H%M')}_sorcery_prices.csv"
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+OUTPUT_FILE = os.path.join(DATA_DIR, f"{datetime.now().strftime('%Y%m%d_%H%M')}_sorcery_prices.csv")
 
 # TCGCSV group names that don't exist in the Sorcery API.
 # Map them to the Sorcery API set name for variant lookup.
