@@ -193,10 +193,21 @@ def compute_ev_table(df: pd.DataFrame, odds: Odds, require_box_price: bool = Tru
 
 
 def find_previous_csv(current_csv: str) -> Optional[str]:
-    """Auto-detect the most recent sorcery_prices CSV before the current one."""
-    directory = os.path.dirname(os.path.abspath(current_csv)) or "."
-    pattern = os.path.join(directory, "*_sorcery_prices.csv")
-    candidates = sorted(glob.glob(pattern))
+    """Auto-detect the most recent sorcery_prices CSV before the current one.
+
+    Searches both the directory containing current_csv and the data/ subdirectory
+    relative to the script location.
+    """
+    search_dirs = set()
+    search_dirs.add(os.path.dirname(os.path.abspath(current_csv)) or ".")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    search_dirs.add(os.path.join(script_dir, "data"))
+
+    candidates = []
+    for d in search_dirs:
+        candidates.extend(sorted(glob.glob(os.path.join(d, "*_sorcery_prices.csv"))))
+    candidates.sort()
+
     current_abs = os.path.abspath(current_csv)
     # Filter out the current file and pick the most recent remaining one
     candidates = [c for c in candidates if os.path.abspath(c) != current_abs]
@@ -396,7 +407,9 @@ def main(argv: list[str]) -> int:
 
     # Timestamped output filenames — never overwrite old data
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    out_dir = os.path.dirname(os.path.abspath(args.csv)) or "."
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    out_dir = os.path.join(script_dir, "data")
+    os.makedirs(out_dir, exist_ok=True)
     ev_out = os.path.join(out_dir, f"{timestamp}_ev_table.csv")
     changes_out = os.path.join(out_dir, f"{timestamp}_changes.csv")
 
