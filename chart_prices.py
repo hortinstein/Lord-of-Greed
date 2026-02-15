@@ -59,7 +59,7 @@ def art_image_url(art_link: str) -> Optional[str]:
 
 
 def render_card_art(art_link: str, columns: int = ART_COLUMNS) -> None:
-    """Download card art and render it as colored ASCII in the terminal."""
+    """Download card art and render it as full-color (24-bit RGB) ASCII in the terminal."""
     url = art_image_url(art_link)
     if not url:
         return
@@ -68,7 +68,31 @@ def render_card_art(art_link: str, columns: int = ART_COLUMNS) -> None:
     except Exception:
         print("  (could not load card image)")
         return
-    art.to_terminal(columns=columns, width_ratio=2.2)
+
+    # Get per-character data with full RGB color info
+    char_list = art.to_character_list(columns=columns, width_ratio=2.2, full_color=True)
+
+    output = []
+    for line in char_list:
+        prev_color = None
+        row = []
+        for ch_data in line:
+            hex_color = ch_data.get("full-hex-color", "#ffffff")
+            # Parse hex to RGB: "#rrggbb"
+            r = int(hex_color[1:3], 16)
+            g = int(hex_color[3:5], 16)
+            b = int(hex_color[5:7], 16)
+            color_code = f"\033[38;2;{r};{g};{b}m"
+            char = ch_data["character"]
+            if color_code == prev_color:
+                row.append(char)
+            else:
+                row.append(color_code + char)
+                prev_color = color_code
+        row.append("\033[0m")
+        output.append("".join(row))
+
+    print("\n".join(output))
 
 
 def discover_snapshots() -> list[tuple[str, str]]:
