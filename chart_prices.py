@@ -3,16 +3,20 @@
 ASCII price charts for Sorcery TCG products.
 
 Uses asciichartpy to render price history from timestamped CSV snapshots.
+Card lookups also display colored ASCII art of the card via ascii-magic.
 
 Usage:
   # Chart all sealed products (booster boxes, packs, cases, etc.)
   python chart_prices.py sealed
 
-  # Chart all versions of a specific card
+  # Chart all versions of a specific card (with ASCII card art)
   python chart_prices.py card "Abundance"
 
   # Case-insensitive partial match
   python chart_prices.py card "headless haunt"
+
+  # Wider ASCII art (default: 60 columns)
+  python chart_prices.py card "Abundance" --art-width 80
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ from typing import Optional
 
 import asciichartpy
 import pandas as pd
+from ascii_magic import AsciiArt
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
@@ -35,6 +40,33 @@ SEALED_NAME_RE = re.compile(
 
 # Timestamp pattern at start of CSV filenames: YYYYMMDD_HHMM
 TS_RE = re.compile(r"^(\d{8}_\d{4})_sorcery_prices\.csv$")
+
+TCGPLAYER_CDN = "https://tcgplayer-cdn.tcgplayer.com/product/{pid}_in_1000x1000.jpg"
+PRODUCT_ID_RE = re.compile(r"/product/(\d+)")
+
+# Sorcery cards are 2.5" × 3.5" (5:7 ratio)
+ART_COLUMNS = 60
+
+
+def art_image_url(art_link: str) -> Optional[str]:
+    """Extract product ID from a TCGPlayer URL and return the CDN image URL."""
+    m = PRODUCT_ID_RE.search(art_link)
+    if m:
+        return TCGPLAYER_CDN.format(pid=m.group(1))
+    return None
+
+
+def render_card_art(art_link: str, columns: int = ART_COLUMNS) -> None:
+    """Download card art and render it as colored ASCII in the terminal."""
+    url = art_image_url(art_link)
+    if not url:
+        return
+    try:
+        art = AsciiArt.from_url(url)
+    except Exception:
+        print("  (could not load card image)")
+        return
+    art.to_terminal(columns=columns, width_ratio=2.2)
 
 
 def discover_snapshots() -> list[tuple[str, str]]:
@@ -156,7 +188,7 @@ def chart_sealed(labels: list[str], df: pd.DataFrame, height: int = 15) -> None:
 
 
 def chart_card(card_query: str, labels: list[str], df: pd.DataFrame,
-               height: int = 15) -> None:
+               height: int = 15, art_columns: int = ART_COLUMNS) -> None:
     """Chart price history for all versions of a card matching the query."""
     pattern = re.compile(re.escape(card_query), re.I)
     # Exclude sealed products from card search
@@ -183,6 +215,9 @@ def chart_card(card_query: str, labels: list[str], df: pd.DataFrame,
     print(f"  PRICE HISTORY FOR: '{card_query}'  ({len(unique_keys)} versions)")
     print(f"{'=' * 60}")
 
+    # Track which art links we've already rendered to avoid duplicates
+    rendered_art: set[str] = set()
+
     for key in unique_keys:
         name, expansion, finish = key
         subset = matches[
@@ -190,6 +225,15 @@ def chart_card(card_query: str, labels: list[str], df: pd.DataFrame,
             & (matches["expansion"] == expansion)
             & (matches["finish"] == finish)
         ]
+
+        # Render ASCII card art (once per unique art_link)
+        if "art_link" in subset.columns:
+            link = subset["art_link"].dropna().iloc[0] if not subset["art_link"].dropna().empty else ""
+            img_url = art_image_url(link) if link else None
+            if img_url and img_url not in rendered_art:
+                rendered_art.add(img_url)
+                render_card_art(link, columns=art_columns)
+
         snap_prices = dict(zip(subset["snapshot"], subset["price"]))
         prices = [snap_prices.get(lbl) for lbl in labels]
 
@@ -215,6 +259,8 @@ def main(argv: list[str] | None = None) -> int:
     card_p = sub.add_parser("card", help="Chart all versions of a specific card")
     card_p.add_argument("query", help="Card name (case-insensitive partial match)")
     card_p.add_argument("--height", type=int, default=15, help="Chart height (rows)")
+    card_p.add_argument("--art-width", type=int, default=ART_COLUMNS,
+                        help="ASCII art width in columns (default: %(default)s)")
 
     args = p.parse_args(argv)
     if not args.command:
@@ -227,7 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sealed":
         chart_sealed(labels, df, height=args.height)
     elif args.command == "card":
-        chart_card(args.query, labels, df, height=args.height)
+        chart_card(args.query, labels, df, height=args.height,
+                   art_columns=args.art_width)
 
     return 0
 
