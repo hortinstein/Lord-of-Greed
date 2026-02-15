@@ -31,6 +31,8 @@ import asciichartpy
 import pandas as pd
 from ascii_magic import AsciiArt
 
+from colors import header, subheader, bold, dim, cyan, yellow, bright_cyan, price_gain, price_loss
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
 
@@ -123,10 +125,20 @@ def chart_series(title: str, labels: list[str], prices: list[Optional[float]],
     lo, hi = min(valid), max(valid)
     price_range = f"${lo:.2f}" if lo == hi else f"${lo:.2f} – ${hi:.2f}"
 
-    print(f"\n{'─' * 60}")
-    print(f"  {title}")
-    print(f"  Range: {price_range}   Points: {len(valid)}")
-    print(f"{'─' * 60}")
+    # Color the trend arrow based on first→last price movement
+    trend = ""
+    if len(valid) >= 2:
+        first_valid = next(v for v in clean if pd.notna(v))
+        last_valid = next(v for v in reversed(clean) if pd.notna(v))
+        if last_valid > first_valid:
+            trend = price_gain(" ▲")
+        elif last_valid < first_valid:
+            trend = price_loss(" ▼")
+
+    print(f"\n{cyan('─' * 60)}")
+    print(f"  {bold(title)}{trend}")
+    print(f"  Range: {yellow(price_range)}   Points: {dim(str(len(valid)))}")
+    print(f"{cyan('─' * 60)}")
 
     chart = asciichartpy.plot(clean, {"height": height, "format": "${:,.2f}"})
     print(chart)
@@ -164,9 +176,9 @@ def chart_sealed(labels: list[str], df: pd.DataFrame, height: int = 15) -> None:
     )
     unique_keys = sorted(sealed_df["key"].unique(), key=lambda k: (k[1], k[0], k[2]))
 
-    print(f"\n{'=' * 60}")
-    print(f"  SEALED PRODUCT PRICE HISTORY  ({len(unique_keys)} products)")
-    print(f"{'=' * 60}")
+    print(f"\n{header('=' * 60)}")
+    print(header(f"  SEALED PRODUCT PRICE HISTORY  ({len(unique_keys)} products)"))
+    print(f"{header('=' * 60)}")
 
     for key in unique_keys:
         name, expansion, finish = key
@@ -211,9 +223,9 @@ def chart_card(card_query: str, labels: list[str], df: pd.DataFrame,
     )
     unique_keys = sorted(matches["key"].unique(), key=lambda k: (k[0], k[1], k[2]))
 
-    print(f"\n{'=' * 60}")
-    print(f"  PRICE HISTORY FOR: '{card_query}'  ({len(unique_keys)} versions)")
-    print(f"{'=' * 60}")
+    print(f"\n{header('=' * 60)}")
+    print(header(f"  PRICE HISTORY FOR: '{card_query}'  ({len(unique_keys)} versions)"))
+    print(f"{header('=' * 60)}")
 
     # Track which art links we've already rendered to avoid duplicates
     rendered_art: set[str] = set()
@@ -268,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     labels, df = load_all_snapshots()
-    print(f"Loaded {len(discover_snapshots())} snapshots spanning {labels[0]} to {labels[-1]}")
+    print(f"Loaded {bold(str(len(discover_snapshots())))} snapshots spanning {bright_cyan(labels[0])} to {bright_cyan(labels[-1])}")
 
     if args.command == "sealed":
         chart_sealed(labels, df, height=args.height)

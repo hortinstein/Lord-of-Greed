@@ -38,6 +38,8 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from colors import header, subheader, price_change, price_gain, price_loss, bold, dim, success, rarity_color
+
 
 SEALED_NAME_RE = re.compile(r"\b(?:booster|box|case|pack|display|starter|precon|deck)\b", re.I)
 
@@ -261,43 +263,45 @@ def compute_price_changes(current_df: pd.DataFrame, prev_df: pd.DataFrame,
 def print_changes_report(changes: pd.DataFrame) -> None:
     """Pretty-print the biggest price changes."""
     if changes.empty:
-        print("\nNo price changes detected (or no overlapping cards found).")
+        print(dim("\nNo price changes detected (or no overlapping cards found)."))
         return
 
-    print("\n" + "=" * 70)
-    print("  BIGGEST PRICE CHANGES SINCE LAST RUN")
-    print("=" * 70)
+    print("\n" + header("=" * 70))
+    print(header("  BIGGEST PRICE CHANGES SINCE LAST RUN"))
+    print(header("=" * 70))
 
     gainers = changes[changes["change ($)"] > 0]
     losers = changes[changes["change ($)"] < 0]
 
     if not gainers.empty:
-        print("\n  TOP GAINERS:")
+        print("\n  " + price_gain("▲ TOP GAINERS:"))
         print("  " + "-" * 66)
         for _, row in gainers.iterrows():
             pct = f"{row['change (%)']:+.1f}%" if pd.notna(row["change (%)"]) else "N/A"
-            print(f"  {row['name']:<35} {row['expansion']:<18} "
-                  f"${row['Prev Price ($)']:>8.2f} -> ${row['Curr Price ($)']:>8.2f}  "
-                  f"({pct})")
+            line = (f"  {row['name']:<35} {row['expansion']:<18} "
+                    f"${row['Prev Price ($)']:>8.2f} -> ${row['Curr Price ($)']:>8.2f}  "
+                    f"({pct})")
+            print(price_gain(line))
 
     if not losers.empty:
-        print("\n  TOP LOSERS:")
+        print("\n  " + price_loss("▼ TOP LOSERS:"))
         print("  " + "-" * 66)
         for _, row in losers.iterrows():
             pct = f"{row['change (%)']:+.1f}%" if pd.notna(row["change (%)"]) else "N/A"
-            print(f"  {row['name']:<35} {row['expansion']:<18} "
-                  f"${row['Prev Price ($)']:>8.2f} -> ${row['Curr Price ($)']:>8.2f}  "
-                  f"({pct})")
+            line = (f"  {row['name']:<35} {row['expansion']:<18} "
+                    f"${row['Prev Price ($)']:>8.2f} -> ${row['Curr Price ($)']:>8.2f}  "
+                    f"({pct})")
+            print(price_loss(line))
 
     print()
 
     # Summary stats
     all_changes = changes["change ($)"]
-    print(f"  Cards compared: {len(changes)}")
-    print(f"  Avg absolute change: ${all_changes.abs().mean():.2f}")
-    print(f"  Max gain:  ${all_changes.max():.2f}")
-    print(f"  Max loss:  ${all_changes.min():.2f}")
-    print("=" * 70)
+    print(f"  Cards compared: {bold(str(len(changes)))}")
+    print(f"  Avg absolute change: {bold(f'${all_changes.abs().mean():.2f}')}")
+    print(f"  Max gain:  {price_gain(f'${all_changes.max():.2f}')}")
+    print(f"  Max loss:  {price_loss(f'${all_changes.min():.2f}')}")
+    print(header("=" * 70))
 
 
 # ── Interesting calculations ──────────────────────────────────────────
@@ -313,44 +317,48 @@ def print_interesting_stats(df: pd.DataFrame) -> None:
     cards["finish_n"] = cards["finish"].map(norm_finish)
     cards["rarity_n"] = cards["rarity"].map(norm_rarity)
 
-    print("\n" + "=" * 70)
-    print("  INTERESTING STATS")
-    print("=" * 70)
+    print("\n" + header("=" * 70))
+    print(header("  INTERESTING STATS"))
+    print(header("=" * 70))
 
     # Foil multiplier by rarity
-    print("\n  FOIL MULTIPLIER BY RARITY (avg foil price / avg standard price):")
+    print("\n  " + subheader("FOIL MULTIPLIER BY RARITY (avg foil price / avg standard price):"))
     print("  " + "-" * 66)
     for rarity in ["Ordinary", "Exceptional", "Elite", "Unique"]:
         std = cards[(cards["rarity_n"] == rarity) & (cards["finish_n"] == "standard")]["price"]
         foil = cards[(cards["rarity_n"] == rarity) & (cards["finish_n"] == "foil")]["price"]
         if len(std) > 0 and len(foil) > 0 and std.mean() > 0:
             mult = foil.mean() / std.mean()
-            print(f"    {rarity:<14} {mult:>6.1f}x  "
+            print(f"    {rarity_color(rarity, f'{rarity:<14}')} {bold(f'{mult:>6.1f}x')}  "
                   f"(std avg ${std.mean():.2f}, foil avg ${foil.mean():.2f})")
 
     # Most expensive cards per set
-    print("\n  TOP 5 MOST EXPENSIVE CARDS PER SET:")
+    print("\n  " + subheader("TOP 5 MOST EXPENSIVE CARDS PER SET:"))
     print("  " + "-" * 66)
     for exp in sorted(cards["expansion"].unique()):
         set_cards = cards[cards["expansion"] == exp].nlargest(5, "price")
-        print(f"\n    {exp}:")
+        print(f"\n    {bold(exp)}:")
         for _, row in set_cards.iterrows():
             finish_tag = " [Foil]" if row["finish_n"] == "foil" else ""
-            print(f"      ${row['price']:>8.2f}  {row['name']}{finish_tag}")
+            price_str = f"${row['price']:>8.2f}"
+            name_str = f"{row['name']}{finish_tag}"
+            if row.get("rarity_n"):
+                name_str = rarity_color(row["rarity_n"], name_str)
+            print(f"      {bold(price_str)}  {name_str}")
 
     # Price distribution by rarity
-    print("\n  PRICE DISTRIBUTION BY RARITY (standard finish):")
+    print("\n  " + subheader("PRICE DISTRIBUTION BY RARITY (standard finish):"))
     print("  " + "-" * 66)
     std_cards = cards[cards["finish_n"] == "standard"]
     for rarity in ["Ordinary", "Exceptional", "Elite", "Unique"]:
         r_cards = std_cards[std_cards["rarity_n"] == rarity]["price"]
         if len(r_cards) > 0:
-            print(f"    {rarity:<14} count={len(r_cards):<4}  "
+            print(f"    {rarity_color(rarity, f'{rarity:<14}')} count={len(r_cards):<4}  "
                   f"min=${r_cards.min():.2f}  median=${r_cards.median():.2f}  "
-                  f"mean=${r_cards.mean():.2f}  max=${r_cards.max():.2f}")
+                  f"mean=${r_cards.mean():.2f}  max={bold(f'${r_cards.max():.2f}')}")
 
     # Total portfolio value by set
-    print("\n  TOTAL CARD VALUE BY SET (1x each card, standard only):")
+    print("\n  " + subheader("TOTAL CARD VALUE BY SET (1x each card, standard only):"))
     print("  " + "-" * 66)
     std_totals = (
         std_cards.groupby("expansion")["price"]
@@ -358,20 +366,22 @@ def print_interesting_stats(df: pd.DataFrame) -> None:
         .sort_values("sum", ascending=False)
     )
     for exp, row in std_totals.iterrows():
-        print(f"    {exp:<25} ${row['sum']:>10.2f}  ({int(row['count'])} cards)")
+        total = row['sum']
+        count = int(row['count'])
+        print(f"    {exp:<25} {bold(f'${total:>10.2f}')}  ({count} cards)")
 
     # Unique-to-Elite price ratio by set
-    print("\n  UNIQUE / ELITE AVERAGE PRICE RATIO BY SET (standard):")
+    print("\n  " + subheader("UNIQUE / ELITE AVERAGE PRICE RATIO BY SET (standard):"))
     print("  " + "-" * 66)
     for exp in sorted(cards["expansion"].unique()):
         elite = std_cards[(std_cards["expansion"] == exp) & (std_cards["rarity_n"] == "Elite")]["price"]
         unique = std_cards[(std_cards["expansion"] == exp) & (std_cards["rarity_n"] == "Unique")]["price"]
         if len(elite) > 0 and len(unique) > 0 and elite.mean() > 0:
             ratio = unique.mean() / elite.mean()
-            print(f"    {exp:<25} {ratio:>6.1f}x  "
+            print(f"    {exp:<25} {bold(f'{ratio:>6.1f}x')}  "
                   f"(elite avg ${elite.mean():.2f}, unique avg ${unique.mean():.2f})")
 
-    print("\n" + "=" * 70)
+    print("\n" + header("=" * 70))
 
 
 def main(argv: list[str]) -> int:
@@ -426,7 +436,7 @@ def main(argv: list[str]) -> int:
     print(show[cols].to_string(index=False))
 
     out.to_csv(ev_out, index=False)
-    print(f"\nWrote EV table: {ev_out}")
+    print(success(f"\nWrote EV table: {ev_out}"))
 
     # ── Biggest changes since last run ────────────────────────────────
     prev_csv = args.prev
@@ -440,7 +450,7 @@ def main(argv: list[str]) -> int:
         print_changes_report(changes)
 
         changes.to_csv(changes_out, index=False)
-        print(f"Wrote changes: {changes_out}")
+        print(success(f"Wrote changes: {changes_out}"))
     else:
         print("\nNo previous CSV found for comparison. Run the scraper again later to see price changes.")
 
