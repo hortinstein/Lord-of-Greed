@@ -16,6 +16,8 @@ from datetime import datetime
 
 import requests
 
+from colors import bold, dim, success, error, cyan
+
 SORCERY_API_URL = "https://api.sorcerytcg.com/api/cards"
 TCGCSV_BASE = "https://tcgcsv.com/tcgplayer/77"
 
@@ -60,11 +62,11 @@ def strip_foil_suffix(name: str) -> str:
 
 def fetch_sorcery_lookup() -> dict:
     """Build lookup: (norm_name, norm_set, finish_lower) → {slug, rarity, artist}."""
-    print("Fetching Sorcery API card data…")
+    print(cyan("Fetching Sorcery API card data…"))
     resp = requests.get(SORCERY_API_URL, timeout=60)
     resp.raise_for_status()
     cards = resp.json()
-    print(f"  {len(cards)} cards returned")
+    print(f"  {bold(str(len(cards)))} cards returned")
 
     lookup: dict[tuple, dict] = {}
     for card in cards:
@@ -81,7 +83,7 @@ def fetch_sorcery_lookup() -> dict:
                     "rarity": rarity,
                     "artist": variant.get("artist", ""),
                 }
-    print(f"  {len(lookup)} variant entries indexed")
+    print(f"  {bold(str(len(lookup)))} variant entries indexed")
     return lookup
 
 
@@ -89,12 +91,12 @@ def fetch_sorcery_lookup() -> dict:
 
 def fetch_groups() -> list[dict]:
     """Fetch all Sorcery TCG groups (expansions) from TCGCSV."""
-    print("Fetching TCGCSV groups…")
+    print(cyan("Fetching TCGCSV groups…"))
     resp = requests.get(f"{TCGCSV_BASE}/groups", timeout=30)
     resp.raise_for_status()
     groups = resp.json().get("results", [])
     for g in groups:
-        print(f"  {g['groupId']}: {g['name']}")
+        print(f"  {dim(str(g['groupId']))}: {g['name']}")
     return groups
 
 
@@ -124,7 +126,7 @@ def build_rows(groups: list[dict], sorcery_lookup: dict) -> list[dict]:
     """Fetch TCGCSV data for every group, merge with Sorcery lookup."""
     rows: list[dict] = []
 
-    print("Fetching products & prices for all groups…")
+    print(cyan("Fetching products & prices for all groups…"))
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {
             pool.submit(fetch_group_products_and_prices, g["groupId"], g["name"]): g
@@ -134,7 +136,7 @@ def build_rows(groups: list[dict], sorcery_lookup: dict) -> list[dict]:
         for future in as_completed(futures):
             gname, products, prices = future.result()
             results.append((gname, products, prices))
-            print(f"  {gname}: {len(products)} products, {len(prices)} price entries")
+            print(f"  {gname}: {bold(str(len(products)))} products, {bold(str(len(prices)))} price entries")
 
     for group_name, products, prices in results:
         product_by_id = {p["productId"]: p for p in products}
@@ -197,7 +199,7 @@ def write_csv(rows: list[dict]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    print(f"\nWrote {len(rows)} rows to {OUTPUT_FILE}")
+    print(success(f"\nWrote {len(rows)} rows to {OUTPUT_FILE}"))
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -212,9 +214,9 @@ def main():
 
         # Quick stats
         matched = sum(1 for r in rows if r["art_link"])
-        print(f"  {matched}/{len(rows)} rows matched to Sorcery API variants")
+        print(f"  {bold(str(matched))}/{len(rows)} rows matched to Sorcery API variants")
     except requests.RequestException as exc:
-        print(f"HTTP error: {exc}", file=sys.stderr)
+        print(error(f"HTTP error: {exc}"), file=sys.stderr)
         sys.exit(1)
 
 

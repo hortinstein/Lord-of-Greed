@@ -31,6 +31,8 @@ import asciichartpy
 import pandas as pd
 from ascii_magic import AsciiArt
 
+from colors import header, subheader, bold, dim, cyan, yellow, bright_cyan, price_gain, price_loss
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
 
@@ -57,7 +59,7 @@ def art_image_url(art_link: str) -> Optional[str]:
 
 
 def render_card_art(art_link: str, columns: int = ART_COLUMNS) -> None:
-    """Download card art and render it as colored ASCII in the terminal."""
+    """Download card art and render it as full-color (24-bit RGB) ASCII in the terminal."""
     url = art_image_url(art_link)
     if not url:
         return
@@ -66,7 +68,31 @@ def render_card_art(art_link: str, columns: int = ART_COLUMNS) -> None:
     except Exception:
         print("  (could not load card image)")
         return
-    art.to_terminal(columns=columns, width_ratio=2.2)
+
+    # Get per-character data with full RGB color info
+    char_list = art.to_character_list(columns=columns, width_ratio=2.2, full_color=True)
+
+    output = []
+    for line in char_list:
+        prev_color = None
+        row = []
+        for ch_data in line:
+            hex_color = ch_data.get("full-hex-color", "#ffffff")
+            # Parse hex to RGB: "#rrggbb"
+            r = int(hex_color[1:3], 16)
+            g = int(hex_color[3:5], 16)
+            b = int(hex_color[5:7], 16)
+            color_code = f"\033[38;2;{r};{g};{b}m"
+            char = ch_data["character"]
+            if color_code == prev_color:
+                row.append(char)
+            else:
+                row.append(color_code + char)
+                prev_color = color_code
+        row.append("\033[0m")
+        output.append("".join(row))
+
+    print("\n".join(output))
 
 
 def discover_snapshots() -> list[tuple[str, str]]:
@@ -123,10 +149,20 @@ def chart_series(title: str, labels: list[str], prices: list[Optional[float]],
     lo, hi = min(valid), max(valid)
     price_range = f"${lo:.2f}" if lo == hi else f"${lo:.2f} – ${hi:.2f}"
 
-    print(f"\n{'─' * 60}")
-    print(f"  {title}")
-    print(f"  Range: {price_range}   Points: {len(valid)}")
-    print(f"{'─' * 60}")
+    # Color the trend arrow based on first→last price movement
+    trend = ""
+    if len(valid) >= 2:
+        first_valid = next(v for v in clean if pd.notna(v))
+        last_valid = next(v for v in reversed(clean) if pd.notna(v))
+        if last_valid > first_valid:
+            trend = price_gain(" ▲")
+        elif last_valid < first_valid:
+            trend = price_loss(" ▼")
+
+    print(f"\n{cyan('─' * 60)}")
+    print(f"  {bold(title)}{trend}")
+    print(f"  Range: {yellow(price_range)}   Points: {dim(str(len(valid)))}")
+    print(f"{cyan('─' * 60)}")
 
     chart = asciichartpy.plot(clean, {"height": height, "format": "${:,.2f}"})
     print(chart)
@@ -164,9 +200,9 @@ def chart_sealed(labels: list[str], df: pd.DataFrame, height: int = 15) -> None:
     )
     unique_keys = sorted(sealed_df["key"].unique(), key=lambda k: (k[1], k[0], k[2]))
 
-    print(f"\n{'=' * 60}")
-    print(f"  SEALED PRODUCT PRICE HISTORY  ({len(unique_keys)} products)")
-    print(f"{'=' * 60}")
+    print(f"\n{header('=' * 60)}")
+    print(header(f"  SEALED PRODUCT PRICE HISTORY  ({len(unique_keys)} products)"))
+    print(f"{header('=' * 60)}")
 
     for key in unique_keys:
         name, expansion, finish = key
@@ -211,9 +247,9 @@ def chart_card(card_query: str, labels: list[str], df: pd.DataFrame,
     )
     unique_keys = sorted(matches["key"].unique(), key=lambda k: (k[0], k[1], k[2]))
 
-    print(f"\n{'=' * 60}")
-    print(f"  PRICE HISTORY FOR: '{card_query}'  ({len(unique_keys)} versions)")
-    print(f"{'=' * 60}")
+    print(f"\n{header('=' * 60)}")
+    print(header(f"  PRICE HISTORY FOR: '{card_query}'  ({len(unique_keys)} versions)"))
+    print(f"{header('=' * 60)}")
 
     # Track which art links we've already rendered to avoid duplicates
     rendered_art: set[str] = set()
@@ -268,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     labels, df = load_all_snapshots()
-    print(f"Loaded {len(discover_snapshots())} snapshots spanning {labels[0]} to {labels[-1]}")
+    print(f"Loaded {bold(str(len(discover_snapshots())))} snapshots spanning {bright_cyan(labels[0])} to {bright_cyan(labels[-1])}")
 
     if args.command == "sealed":
         chart_sealed(labels, df, height=args.height)
