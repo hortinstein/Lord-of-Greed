@@ -251,8 +251,24 @@ def chart_card(card_query: str, labels: list[str], df: pd.DataFrame,
     print(header(f"  PRICE HISTORY FOR: '{card_query}'  ({len(unique_keys)} versions)"))
     print(f"{header('=' * 60)}")
 
-    # Track which art links we've already rendered to avoid duplicates
-    rendered_art: set[str] = set()
+    # Render card art once at the top (first available art_link)
+    art_rendered = False
+    if "art_link" in matches.columns:
+        for key in unique_keys:
+            if art_rendered:
+                break
+            name, expansion, finish = key
+            subset = matches[
+                (matches["name"] == name)
+                & (matches["expansion"] == expansion)
+                & (matches["finish"] == finish)
+            ]
+            links = subset["art_link"].dropna()
+            url_links = links[links.str.startswith("http")]
+            link = url_links.iloc[0] if not url_links.empty else (links.iloc[0] if not links.empty else "")
+            if link and art_image_url(link):
+                render_card_art(link, columns=art_columns)
+                art_rendered = True
 
     for key in unique_keys:
         name, expansion, finish = key
@@ -261,14 +277,6 @@ def chart_card(card_query: str, labels: list[str], df: pd.DataFrame,
             & (matches["expansion"] == expansion)
             & (matches["finish"] == finish)
         ]
-
-        # Render ASCII card art (once per unique art_link)
-        if "art_link" in subset.columns:
-            link = subset["art_link"].dropna().iloc[0] if not subset["art_link"].dropna().empty else ""
-            img_url = art_image_url(link) if link else None
-            if img_url and img_url not in rendered_art:
-                rendered_art.add(img_url)
-                render_card_art(link, columns=art_columns)
 
         snap_prices = dict(zip(subset["snapshot"], subset["price"]))
         prices = [snap_prices.get(lbl) for lbl in labels]
