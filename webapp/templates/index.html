@@ -1,0 +1,1271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sorcery TCG Card Browser</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #12100e;
+    --surface: #1e1a15;
+    --border: #3a3228;
+    --text: #e8e0d4;
+    --text-dim: #9a8e7e;
+    --accent: #c9973e;
+    --accent-hover: #e0b050;
+    --accent-glow: rgba(201,151,62,0.15);
+    --green: #7ebd5a;
+    --red: #d45050;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* ── Top bar ─────────────────────────────────── */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .topbar h1 {
+    font-size: 1.1rem;
+    color: var(--accent);
+    margin-right: 12px;
+    white-space: nowrap;
+  }
+
+  .topbar input[type="text"] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    width: 200px;
+  }
+  .topbar input[type="text"]:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+  }
+
+  .topbar select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .topbar select:focus { outline: none; border-color: var(--accent); }
+
+  .topbar .sort-toggle {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  .topbar .sort-toggle:hover { border-color: var(--accent); }
+
+  .topbar .card-count {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+
+  /* ── Zoom slider ────────────────────────────────── */
+  .zoom-wrap {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+  .zoom-wrap input[type="range"] {
+    width: 90px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  /* ── Accent button (Deck, Sealed toggle) ─────── */
+  .accent-btn {
+    background: var(--accent);
+    border: none;
+    color: #1a1510;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .accent-btn:hover { background: var(--accent-hover); }
+
+  /* ── Card grid ───────────────────────────────── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(var(--card-width, 210px), 1fr));
+    gap: 16px;
+    padding: 20px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+  }
+  .card:hover { transform: translateY(-4px); }
+
+  /* Rarity borders */
+  .card.rarity-ordinary    { border-color: #5a5040; }
+  .card.rarity-ordinary:hover { border-color: #8a7e6e; box-shadow: 0 4px 12px rgba(138,126,110,0.2); }
+  .card.rarity-exceptional { border-color: #4a7a30; }
+  .card.rarity-exceptional:hover { border-color: #6cb048; box-shadow: 0 4px 12px rgba(108,176,72,0.3); }
+  .card.rarity-elite       { border-color: #7040a0; }
+  .card.rarity-elite:hover { border-color: #a070d0; box-shadow: 0 4px 12px rgba(160,112,208,0.3); }
+  .card.rarity-unique      { border-color: #c9973e; }
+  .card.rarity-unique:hover { border-color: #e0b050; box-shadow: 0 4px 12px rgba(224,176,80,0.35); }
+  .card.rarity-promo       { border-color: #2a8a8a; }
+  .card.rarity-promo:hover { border-color: #40c0c0; box-shadow: 0 4px 12px rgba(64,192,192,0.3); }
+
+  .card .img-wrap {
+    width: 100%;
+    aspect-ratio: 5/7;
+    background: #0e0c0a;
+    position: relative;
+    overflow: hidden;
+  }
+  .card .img-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .card .foil-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      135deg,
+      rgba(255,255,255,0) 0%,
+      rgba(255,220,150,0.12) 30%,
+      rgba(200,180,255,0.10) 50%,
+      rgba(255,200,140,0.12) 70%,
+      rgba(255,255,255,0) 100%
+    );
+    pointer-events: none;
+  }
+
+  .card .info { padding: 10px 12px; }
+
+  .card .card-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+    line-height: 1.2;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .card .card-price {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--green);
+    margin-bottom: 6px;
+  }
+
+  .card .badges { display: flex; flex-wrap: wrap; gap: 4px; }
+
+  .badge {
+    font-size: 0.7rem;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .badge-expansion { background: #2a2418; color: var(--accent); border: 1px solid #3a3220; }
+
+  .badge-rarity-ordinary    { background: #2a2620; color: #a09080; }
+  .badge-rarity-exceptional { background: #1e2e16; color: #7ebd5a; }
+  .badge-rarity-elite       { background: #28183e; color: #b388ff; }
+  .badge-rarity-unique      { background: #3a2e18; color: #e0b050; }
+
+  .badge-foil {
+    background: linear-gradient(90deg, #3a2e20, #2a2e3a);
+    color: #d4c8a0;
+  }
+
+  .badge-sealed-type {
+    background: #1e2a28;
+    color: #60b0a0;
+    border: 1px solid #2a3a38;
+  }
+
+  /* ── Sentinel / loading ──────────────────────── */
+  .sentinel {
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 0.9rem;
+  }
+
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    margin-right: 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Modal (shared backdrop style) ─────────── */
+  .modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.80);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .modal-backdrop.open { display: flex; }
+
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    max-width: 800px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    position: relative;
+  }
+
+  .modal-close {
+    position: absolute;
+    top: 12px;
+    right: 16px;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.5rem;
+    cursor: pointer;
+    z-index: 10;
+    line-height: 1;
+  }
+  .modal-close:hover { color: var(--text); }
+
+  .modal-body {
+    display: flex;
+    gap: 20px;
+    padding: 24px;
+  }
+
+  .modal-img {
+    flex: 0 0 260px;
+    aspect-ratio: 5/7;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0e0c0a;
+  }
+  .modal-img img { width: 100%; height: 100%; object-fit: cover; }
+
+  .modal-details { flex: 1; min-width: 0; }
+  .modal-details h2 { font-size: 1.3rem; margin-bottom: 12px; }
+
+  .modal-details .detail-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .modal-details .detail-label { color: var(--text-dim); }
+  .modal-details .detail-value { font-weight: 600; }
+
+  .modal-details .price-big {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--green);
+    margin: 12px 0;
+  }
+
+  .modal-details .tcg-link {
+    display: inline-block;
+    margin-top: 10px;
+    padding: 8px 16px;
+    background: var(--accent);
+    color: #1a1510;
+    text-decoration: none;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .modal-details .tcg-link:hover { background: var(--accent-hover); }
+
+  .modal-chart { padding: 0 24px 24px; }
+  .modal-chart h3 { font-size: 0.95rem; color: var(--text-dim); margin-bottom: 10px; }
+  .modal-chart canvas { width: 100% !important; max-height: 250px; }
+
+  /* ── Deck modal ─────────────────────────────── */
+  .deck-modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    max-width: 960px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .deck-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 24px 0;
+  }
+  .deck-modal-header h2 { font-size: 1.2rem; }
+
+  .deck-input-area {
+    padding: 16px 24px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+  }
+  .deck-input-area input[type="text"] {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.9rem;
+  }
+  .deck-input-area input[type="text"]:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+  }
+  .deck-input-area input[type="text"]::placeholder { color: var(--text-dim); }
+
+  .deck-input-area button {
+    background: var(--accent);
+    border: none;
+    color: #1a1510;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .deck-input-area button:hover { background: var(--accent-hover); }
+  .deck-input-area button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .deck-error {
+    padding: 0 24px;
+    color: var(--red);
+    font-size: 0.85rem;
+  }
+
+  .deck-results { padding: 0 24px 24px; }
+
+  .deck-name-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--bg);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+  }
+  .deck-name-bar .deck-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--accent);
+    flex: 1;
+  }
+  .deck-name-bar .deck-format {
+    font-size: 0.75rem;
+    background: #2a2418;
+    color: var(--accent);
+    padding: 3px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .deck-name-bar .deck-total {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--green);
+  }
+
+  .deck-section-label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    margin: 16px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .deck-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 10px;
+  }
+
+  .deck-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .deck-card.not-found { opacity: 0.5; border-color: var(--red); }
+
+  .deck-card .deck-card-img {
+    width: 100%;
+    aspect-ratio: 5/7;
+    background: #0e0c0a;
+    overflow: hidden;
+  }
+  .deck-card .deck-card-img img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .deck-card .deck-card-info { padding: 8px 10px; font-size: 0.8rem; }
+  .deck-card .deck-card-name {
+    font-weight: 600;
+    margin-bottom: 4px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .deck-card .deck-card-qty { color: var(--text-dim); }
+  .deck-card .deck-card-price { color: var(--green); font-weight: 700; }
+  .deck-card .deck-card-notfound { color: var(--red); font-size: 0.75rem; }
+
+  /* ── Sealed stats inline section ─────────────── */
+  .sealed-overview {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+    padding: 0 20px 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+  .sealed-stat-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    text-align: center;
+  }
+  .sealed-stat-box .stat-value {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .sealed-stat-box .stat-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+
+  .sealed-chart-wrap {
+    padding: 0 20px 16px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+  .sealed-chart-wrap h3 {
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .sealed-chart-wrap canvas {
+    width: 100% !important;
+    max-height: 200px;
+  }
+
+  .sealed-expansion-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px;
+    font-size: 0.85rem;
+  }
+  .sealed-expansion-table th {
+    text-align: left;
+    padding: 6px 12px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+  }
+  .sealed-expansion-table td {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sealed-expansion-table tr:hover { background: var(--bg); }
+
+  .sealed-inline-section {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 0 20px 16px;
+  }
+
+  .sealed-type-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 20px 12px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+  .sealed-type-toggle {
+    padding: 4px 12px;
+    border-radius: 5px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-dim);
+    transition: all 0.15s;
+  }
+  .sealed-type-toggle.active {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #1a1510;
+  }
+
+  /* ── Responsive ──────────────────────────────── */
+  @media (max-width: 700px) {
+    .modal-body { flex-direction: column; }
+    .modal-img { flex: none; width: 100%; max-width: 300px; margin: 0 auto; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 12px; }
+    .deck-input-area { flex-direction: column; }
+    .deck-card-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Top bar ──────────────────────────────────────── -->
+<div class="topbar">
+  <h1>Sorcery TCG</h1>
+  <input type="text" id="searchInput" placeholder="Search cards...">
+  <!-- Card filters (hidden in sealed mode) -->
+  <select id="categoryFilter"><option value="">All Categories</option></select>
+  <select id="expansionFilter"><option value="">All Expansions</option></select>
+  <select id="rarityFilter"><option value="">All Rarities</option></select>
+  <select id="finishFilter"><option value="">All Finishes</option></select>
+  <select id="sealedTypeFilter" style="display:none"><option value="">All Types</option></select>
+  <select id="sortSelect">
+    <option value="name">Sort: Name</option>
+    <option value="price">Sort: Price</option>
+    <option value="rarity">Sort: Rarity</option>
+    <option value="expansion">Sort: Expansion</option>
+  </select>
+  <button class="sort-toggle" id="orderToggle" title="Toggle sort order">&#9650; Asc</button>
+  <div class="zoom-wrap">
+    <span>Zoom</span>
+    <input type="range" id="zoomSlider" min="120" max="350" value="210" step="10">
+  </div>
+  <button class="accent-btn" id="deckBtn">Deck</button>
+  <button class="accent-btn" id="sealedToggleBtn">Sealed</button>
+  <span class="card-count" id="cardCount"></span>
+</div>
+
+<!-- ── Sealed stats (inline, shown when toggled) ────── -->
+<div id="sealedStatsSection" style="display:none">
+  <div id="sealedOverview" class="sealed-overview"></div>
+  <div id="sealedChartWrap" class="sealed-chart-wrap" style="display:none">
+    <h3>Average Sealed Price Over Time</h3>
+    <canvas id="sealedPriceChart"></canvas>
+  </div>
+  <div id="sealedTableWrap" class="sealed-inline-section"></div>
+  <div id="sealedTypeToggles" class="sealed-type-toggles"></div>
+</div>
+
+<!-- ── Card grid ───────────────────────────────────── -->
+<div class="grid" id="cardGrid"></div>
+<div class="sentinel" id="sentinel">
+  <div class="spinner"></div> Loading cards...
+</div>
+
+<!-- ── Card detail modal ───────────────────────────── -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal" id="modal">
+    <button class="modal-close" id="modalClose">&times;</button>
+    <div class="modal-body">
+      <div class="modal-img" id="modalImg"></div>
+      <div class="modal-details" id="modalDetails"></div>
+    </div>
+    <div class="modal-chart">
+      <h3>Price History</h3>
+      <canvas id="priceChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- ── Deck modal ──────────────────────────────────── -->
+<div class="modal-backdrop" id="deckBackdrop">
+  <div class="deck-modal">
+    <div class="deck-modal-header">
+      <h2>Import Curiosa Deck</h2>
+      <button class="modal-close" id="deckClose">&times;</button>
+    </div>
+    <div class="deck-input-area">
+      <input type="text" id="deckUrlInput" placeholder="Paste a Curiosa deck link, e.g. https://curiosa.io/decks/...">
+      <button id="deckLookup">Import</button>
+    </div>
+    <div class="deck-error" id="deckError"></div>
+    <div class="deck-results" id="deckResults"></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  // ── State ───────────────────────────────────────
+  let page = 1;
+  const perPage = 50;
+  let loading = false;
+  let hasMore = true;
+  let currentOrder = 'asc';
+  let priceChart = null;
+  let debounceTimer = null;
+  let abortCtrl = null;
+  let sealedMode = false;
+  let sealedChart = null;
+  let sealedData = null;
+  let sealedTypeFilters = new Set(['Box', 'Pack']);
+
+  const grid = document.getElementById('cardGrid');
+  const sentinel = document.getElementById('sentinel');
+  const searchInput = document.getElementById('searchInput');
+  const categoryFilter = document.getElementById('categoryFilter');
+  const expansionFilter = document.getElementById('expansionFilter');
+  const rarityFilter = document.getElementById('rarityFilter');
+  const finishFilter = document.getElementById('finishFilter');
+  const sealedTypeFilter = document.getElementById('sealedTypeFilter');
+  const sortSelect = document.getElementById('sortSelect');
+  const orderToggle = document.getElementById('orderToggle');
+  const zoomSlider = document.getElementById('zoomSlider');
+  const cardCount = document.getElementById('cardCount');
+  const modalBackdrop = document.getElementById('modalBackdrop');
+  const sealedToggleBtn = document.getElementById('sealedToggleBtn');
+  const sealedStatsSection = document.getElementById('sealedStatsSection');
+
+  // Card-mode filter elements
+  const cardFilters = [categoryFilter, expansionFilter, rarityFilter, finishFilter, sealedTypeFilter];
+
+  // ── Load filter options, then do initial card fetch ─
+  fetch('/api/filters')
+    .then(r => r.json())
+    .then(data => {
+      data.categories.forEach(v => {
+        categoryFilter.add(new Option(v, v));
+      });
+      data.expansions.forEach(v => {
+        expansionFilter.add(new Option(v, v));
+      });
+      data.rarities.forEach(v => {
+        rarityFilter.add(new Option(v, v));
+      });
+      data.finishes.forEach(v => {
+        finishFilter.add(new Option(v, v));
+      });
+      (data.sealed_types || []).forEach(v => {
+        sealedTypeFilter.add(new Option(v, v));
+      });
+      // Default to Cards category and Standard finish
+      categoryFilter.value = 'Cards';
+      finishFilter.value = 'Standard';
+      fetchCards(false);
+    });
+
+  // ── Build query string ──────────────────────────
+  function buildQuery() {
+    const params = new URLSearchParams();
+    params.set('page', page);
+    params.set('per_page', perPage);
+    params.set('sort', sortSelect.value);
+    params.set('order', currentOrder);
+    const search = searchInput.value.trim();
+    if (search) params.set('search', search);
+
+    if (sealedMode) {
+      params.set('category', 'Sealed');
+      params.set('per_page', 200); // fetch all sealed at once for client-side type filtering
+    } else {
+      const category = categoryFilter.value;
+      if (category) params.set('category', category);
+      const rarity = rarityFilter.value;
+      if (rarity) params.set('rarity', rarity);
+      const expansion = expansionFilter.value;
+      if (expansion) params.set('expansion', expansion);
+      const finish = finishFilter.value;
+      if (finish) params.set('finish', finish);
+      const sealedType = sealedTypeFilter.value;
+      if (sealedType) params.set('sealed_type', sealedType);
+    }
+    return params.toString();
+  }
+
+  // ── Rarity badge class ──────────────────────────
+  function rarityClass(r) {
+    if (!r) return 'badge-rarity-ordinary';
+    switch (r.toLowerCase()) {
+      case 'exceptional': return 'badge-rarity-exceptional';
+      case 'elite': return 'badge-rarity-elite';
+      case 'unique': return 'badge-rarity-unique';
+      default: return 'badge-rarity-ordinary';
+    }
+  }
+
+  // ── Format price ────────────────────────────────
+  function fmtPrice(p) {
+    if (p == null) return 'N/A';
+    return '$' + Number(p).toFixed(2);
+  }
+
+  // ── Rarity card border class ────────────────────
+  function rarityCardClass(r) {
+    if (!r) return 'rarity-ordinary';
+    switch (r.toLowerCase()) {
+      case 'exceptional': return 'rarity-exceptional';
+      case 'elite': return 'rarity-elite';
+      case 'unique': return 'rarity-unique';
+      case 'promo': return 'rarity-promo';
+      default: return 'rarity-ordinary';
+    }
+  }
+
+  // ── Create card element ─────────────────────────
+  function createCard(card) {
+    const el = document.createElement('div');
+    el.className = 'card ' + rarityCardClass(card.rarity);
+
+    const isFoil = (card.finish || '').toLowerCase() === 'foil';
+    const foilOverlay = isFoil ? '<div class="foil-overlay"></div>' : '';
+
+    const isSealed = card.category === 'Sealed';
+    const sealedBadge = isSealed && card.sealed_type
+      ? `<span class="badge badge-sealed-type">${card.sealed_type}</span>`
+      : '';
+
+    el.innerHTML = `
+      <div class="img-wrap">
+        <img src="${card.image_url || ''}" alt="${card.name}" loading="lazy"
+             onerror="this.style.display='none'">
+        ${foilOverlay}
+      </div>
+      <div class="info">
+        <div class="card-name">${card.name}</div>
+        <div class="card-price">${fmtPrice(card.price)}</div>
+        <div class="badges">
+          <span class="badge badge-expansion">${card.expansion}</span>
+          ${isSealed ? sealedBadge : `<span class="badge ${rarityClass(card.rarity)}">${card.rarity || 'Unknown'}</span>`}
+          ${isFoil ? '<span class="badge badge-foil">Foil</span>' : ''}
+        </div>
+      </div>
+    `;
+
+    el.addEventListener('click', () => openModal(card));
+    return el;
+  }
+
+  // ── Fetch cards ─────────────────────────────────
+  let sealedProductCache = []; // cache all sealed products for client-side type filtering
+
+  function fetchCards(append) {
+    if (abortCtrl) abortCtrl.abort();
+    abortCtrl = new AbortController();
+
+    loading = true;
+    sentinel.style.display = 'flex';
+
+    fetch('/api/cards?' + buildQuery(), { signal: abortCtrl.signal })
+      .then(r => r.json())
+      .then(data => {
+        if (!append) grid.innerHTML = '';
+
+        if (sealedMode) {
+          // Cache all sealed products and filter client-side by type toggles
+          sealedProductCache = data.cards;
+          const filtered = filterSealedByType(data.cards);
+          filtered.forEach(c => grid.appendChild(createCard(c)));
+          cardCount.textContent = filtered.length + ' products';
+          sentinel.style.display = 'none'; // no pagination in sealed mode
+        } else {
+          data.cards.forEach(c => grid.appendChild(createCard(c)));
+          hasMore = data.has_more;
+          cardCount.textContent = data.total + ' cards';
+          if (!hasMore) sentinel.style.display = 'none';
+        }
+        loading = false;
+      })
+      .catch(err => {
+        if (err.name !== 'AbortError') loading = false;
+      });
+  }
+
+  function filterSealedByType(cards) {
+    if (sealedTypeFilters.size === 0) return cards;
+    return cards.filter(c => sealedTypeFilters.has(c.sealed_type || 'Other'));
+  }
+
+  function rerenderSealedGrid() {
+    grid.innerHTML = '';
+    const filtered = filterSealedByType(sealedProductCache);
+    filtered.forEach(c => grid.appendChild(createCard(c)));
+    cardCount.textContent = filtered.length + ' products';
+  }
+
+  function resetAndFetch() {
+    page = 1;
+    hasMore = true;
+    fetchCards(false);
+  }
+
+  // ── Sealed toggle ─────────────────────────────
+  function enterSealedMode() {
+    sealedMode = true;
+    sealedToggleBtn.textContent = 'Cards';
+    // Hide card-specific filters
+    cardFilters.forEach(el => el.style.display = 'none');
+    // Show sealed stats section
+    sealedStatsSection.style.display = 'block';
+    // Load sealed stats
+    loadSealedStats();
+    // Fetch sealed products for the grid
+    resetAndFetch();
+  }
+
+  function exitSealedMode() {
+    sealedMode = false;
+    sealedToggleBtn.textContent = 'Sealed';
+    // Show card filters
+    cardFilters.forEach(el => el.style.display = '');
+    // Restore sealed type filter visibility based on category
+    sealedTypeFilter.style.display = categoryFilter.value === 'Sealed' ? '' : 'none';
+    // Hide sealed stats
+    sealedStatsSection.style.display = 'none';
+    if (sealedChart) { sealedChart.destroy(); sealedChart = null; }
+    // Fetch cards
+    resetAndFetch();
+  }
+
+  sealedToggleBtn.addEventListener('click', () => {
+    if (sealedMode) exitSealedMode();
+    else enterSealedMode();
+  });
+
+  function loadSealedStats() {
+    const overview = document.getElementById('sealedOverview');
+    overview.innerHTML = '<div style="text-align:center;padding:12px;"><div class="spinner" style="display:inline-block;margin-right:0;"></div></div>';
+
+    fetch('/api/sealed/stats')
+      .then(r => r.json())
+      .then(data => {
+        sealedData = data;
+        renderSealedInline(data);
+        renderSealedChartInline(data);
+      });
+  }
+
+  function renderSealedInline(data) {
+    // Overview stat boxes
+    const overview = document.getElementById('sealedOverview');
+    overview.innerHTML = `
+      <div class="sealed-stat-box"><div class="stat-value">${data.count}</div><div class="stat-label">Products</div></div>
+      <div class="sealed-stat-box"><div class="stat-value">${fmtPrice(data.total_value)}</div><div class="stat-label">Total Value</div></div>
+      <div class="sealed-stat-box"><div class="stat-value">${fmtPrice(data.avg_price)}</div><div class="stat-label">Avg Price</div></div>
+      <div class="sealed-stat-box"><div class="stat-value">${fmtPrice(data.min_price)}</div><div class="stat-label">Min Price</div></div>
+      <div class="sealed-stat-box"><div class="stat-value">${fmtPrice(data.max_price)}</div><div class="stat-label">Max Price</div></div>
+    `;
+
+    // Expansion table
+    const tableWrap = document.getElementById('sealedTableWrap');
+    if (data.by_expansion && data.by_expansion.length > 0) {
+      let html = '<table class="sealed-expansion-table"><thead><tr><th>Expansion</th><th>Count</th><th>Avg</th><th>Min</th><th>Max</th></tr></thead><tbody>';
+      data.by_expansion.forEach(e => {
+        html += `<tr><td>${e.expansion}</td><td>${e.count}</td><td style="color:var(--green)">${fmtPrice(e.avg_price)}</td><td>${fmtPrice(e.min_price)}</td><td>${fmtPrice(e.max_price)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      tableWrap.innerHTML = html;
+    } else {
+      tableWrap.innerHTML = '';
+    }
+
+    // Type toggle buttons
+    const togglesWrap = document.getElementById('sealedTypeToggles');
+    const types = [...new Set(data.products.map(p => p.sealed_type || 'Other'))].sort();
+    let html = '';
+    types.forEach(t => {
+      const active = sealedTypeFilters.has(t);
+      html += `<button class="sealed-type-toggle${active ? ' active' : ''}" data-type="${t}">${t}</button>`;
+    });
+    togglesWrap.innerHTML = html;
+
+    // Wire up type toggles
+    togglesWrap.querySelectorAll('.sealed-type-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const t = btn.dataset.type;
+        if (sealedTypeFilters.has(t)) sealedTypeFilters.delete(t);
+        else sealedTypeFilters.add(t);
+        btn.classList.toggle('active');
+        rerenderSealedGrid();
+        renderSealedChartInline(sealedData);
+      });
+    });
+  }
+
+  function getFilteredChartPrices(data) {
+    // If no type filters active or no per-type data, use overall average
+    if (!data.history_by_type || sealedTypeFilters.size === 0) {
+      return data.history_avg_prices;
+    }
+    // Average the per-type series for active filters
+    const labels = data.history_labels;
+    const activeTypes = [...sealedTypeFilters].filter(t => data.history_by_type[t]);
+    if (activeTypes.length === 0) return data.history_avg_prices;
+
+    return labels.map((_, i) => {
+      let sum = 0, count = 0;
+      activeTypes.forEach(t => {
+        const val = data.history_by_type[t][i];
+        if (val != null) { sum += val; count++; }
+      });
+      return count > 0 ? Math.round(sum / count * 100) / 100 : null;
+    });
+  }
+
+  function renderSealedChartInline(data) {
+    if (!data.history_labels) return;
+    const prices = getFilteredChartPrices(data);
+    if (!prices) return;
+    const canvas = document.getElementById('sealedPriceChart');
+    if (!canvas) return;
+    const chartWrap = document.getElementById('sealedChartWrap');
+    chartWrap.style.display = data.history_labels.length > 0 ? '' : 'none';
+    const ctx = canvas.getContext('2d');
+    if (sealedChart) sealedChart.destroy();
+    sealedChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: data.history_labels,
+        datasets: [{
+          label: 'Avg Price ($)',
+          data: prices,
+          borderColor: '#c9973e',
+          backgroundColor: 'rgba(201,151,62,0.1)',
+          fill: true, tension: 0.3, pointRadius: 3,
+          pointBackgroundColor: '#e0b050', spanGaps: true,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '$' + (ctx.parsed.y != null ? ctx.parsed.y.toFixed(2) : 'N/A') } } },
+        scales: {
+          x: { ticks: { color: '#9a8e7e', maxRotation: 45, font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+          y: { ticks: { color: '#9a8e7e', callback: v => '$' + v.toFixed(2) }, grid: { color: 'rgba(255,255,255,0.04)' } }
+        }
+      }
+    });
+  }
+
+  // ── Event listeners ─────────────────────────────
+  searchInput.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(resetAndFetch, 300);
+  });
+
+  [categoryFilter, expansionFilter, rarityFilter, finishFilter, sealedTypeFilter, sortSelect].forEach(el => {
+    el.addEventListener('change', resetAndFetch);
+  });
+
+  // Show/hide sealed type filter based on category
+  categoryFilter.addEventListener('change', () => {
+    sealedTypeFilter.style.display = categoryFilter.value === 'Sealed' ? '' : 'none';
+    if (categoryFilter.value !== 'Sealed') sealedTypeFilter.value = '';
+  });
+
+  orderToggle.addEventListener('click', () => {
+    currentOrder = currentOrder === 'asc' ? 'desc' : 'asc';
+    orderToggle.innerHTML = currentOrder === 'asc' ? '&#9650; Asc' : '&#9660; Desc';
+    resetAndFetch();
+  });
+
+  // ── Infinite scroll ─────────────────────────────
+  const observer = new IntersectionObserver(entries => {
+    if (entries[0].isIntersecting && hasMore && !loading) {
+      page++;
+      fetchCards(true);
+    }
+  }, { rootMargin: '200px' });
+  observer.observe(sentinel);
+
+  // ── Card detail modal ───────────────────────────
+  function openModal(card) {
+    const isFoil = (card.finish || '').toLowerCase() === 'foil';
+
+    document.getElementById('modalImg').innerHTML = `
+      <img src="${card.image_url || ''}" alt="${card.name}"
+           onerror="this.style.display='none'">
+    `;
+
+    document.getElementById('modalDetails').innerHTML = `
+      <h2>${card.name}</h2>
+      <div class="price-big">${fmtPrice(card.price)}</div>
+      <div class="detail-row">
+        <span class="detail-label">Expansion</span>
+        <span class="detail-value">${card.expansion}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Rarity</span>
+        <span class="detail-value">${card.rarity || 'Unknown'}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Finish</span>
+        <span class="detail-value">${card.finish}${isFoil ? ' &#10024;' : ''}</span>
+      </div>
+      ${card.art_link ? `<a class="tcg-link" href="${card.art_link}" target="_blank" rel="noopener">View on TCGPlayer</a>` : ''}
+    `;
+
+    modalBackdrop.classList.add('open');
+    document.body.style.overflow = 'hidden';
+
+    const hParams = new URLSearchParams();
+    hParams.set('name', card.name);
+    hParams.set('expansion', card.expansion);
+    hParams.set('finish', card.finish);
+
+    fetch('/api/card/history?' + hParams.toString())
+      .then(r => r.json())
+      .then(data => renderChart(data.labels, data.prices));
+  }
+
+  function closeModal() {
+    modalBackdrop.classList.remove('open');
+    document.body.style.overflow = '';
+    if (priceChart) { priceChart.destroy(); priceChart = null; }
+  }
+
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  modalBackdrop.addEventListener('click', e => {
+    if (e.target === modalBackdrop) closeModal();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      if (modalBackdrop.classList.contains('open')) closeModal();
+      else if (document.getElementById('deckBackdrop').classList.contains('open')) closeDeck();
+    }
+  });
+
+  // ── Chart ───────────────────────────────────────
+  function renderChart(labels, prices) {
+    const ctx = document.getElementById('priceChart').getContext('2d');
+    if (priceChart) priceChart.destroy();
+
+    priceChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Price ($)',
+          data: prices,
+          borderColor: '#c9973e',
+          backgroundColor: 'rgba(201,151,62,0.1)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+          pointBackgroundColor: '#e0b050',
+          spanGaps: true,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => '$' + (ctx.parsed.y != null ? ctx.parsed.y.toFixed(2) : 'N/A')
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#9a8e7e', maxRotation: 45, font: { size: 10 } },
+            grid: { color: 'rgba(255,255,255,0.04)' }
+          },
+          y: {
+            ticks: { color: '#9a8e7e', callback: v => '$' + v.toFixed(2) },
+            grid: { color: 'rgba(255,255,255,0.04)' }
+          }
+        }
+      }
+    });
+  }
+
+  // ── Zoom slider ─────────────────────────────────
+  zoomSlider.addEventListener('input', () => {
+    grid.style.setProperty('--card-width', zoomSlider.value + 'px');
+  });
+
+  // ── Deck modal ──────────────────────────────────
+  const deckBackdrop = document.getElementById('deckBackdrop');
+  const deckUrlInput = document.getElementById('deckUrlInput');
+  const deckResults = document.getElementById('deckResults');
+  const deckError = document.getElementById('deckError');
+  const deckLookupBtn = document.getElementById('deckLookup');
+
+  document.getElementById('deckBtn').addEventListener('click', () => {
+    deckBackdrop.classList.add('open');
+    document.body.style.overflow = 'hidden';
+    deckUrlInput.focus();
+  });
+
+  function closeDeck() {
+    deckBackdrop.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  document.getElementById('deckClose').addEventListener('click', closeDeck);
+  deckBackdrop.addEventListener('click', e => {
+    if (e.target === deckBackdrop) closeDeck();
+  });
+
+  deckUrlInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') deckLookupBtn.click();
+  });
+
+  function renderDeckSection(label, entries) {
+    if (!entries || entries.length === 0) return '';
+    const totalQty = entries.reduce((s, e) => s + e.qty, 0);
+    let html = `<div class="deck-section-label">${label} (${totalQty})</div>`;
+    html += '<div class="deck-card-grid">';
+    entries.forEach(e => {
+      const notFoundCls = e.found ? '' : ' not-found';
+      const unitPrice = e.found ? fmtPrice(e.price) : '';
+      const lineTotal = e.found && e.price ? fmtPrice(e.price * e.qty) : '';
+      html += `<div class="deck-card${notFoundCls}">
+        <div class="deck-card-img">
+          ${e.image_url ? `<img src="${e.image_url}" alt="${e.name}" loading="lazy" onerror="this.style.display='none'">` : ''}
+        </div>
+        <div class="deck-card-info">
+          <div class="deck-card-name">${e.name}</div>
+          <div class="deck-card-qty">x${e.qty}</div>
+          ${e.found
+            ? `<div class="deck-card-price">${unitPrice}${e.qty > 1 ? ' / ' + lineTotal : ''}</div>`
+            : '<div class="deck-card-notfound">Not found</div>'
+          }
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+    return html;
+  }
+
+  deckLookupBtn.addEventListener('click', () => {
+    const url = deckUrlInput.value.trim();
+    if (!url) return;
+
+    deckError.textContent = '';
+    deckResults.innerHTML = '<div style="text-align:center;padding:24px;"><div class="spinner" style="display:inline-block;margin-right:0;"></div></div>';
+    deckLookupBtn.disabled = true;
+
+    const finish = finishFilter.value || 'Standard';
+
+    fetch('/api/deck', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, finish })
+    })
+      .then(r => {
+        if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Request failed'); });
+        return r.json();
+      })
+      .then(data => {
+        let html = '';
+
+        html += `<div class="deck-name-bar">
+          <span class="deck-title">${data.deck_name}</span>
+          ${data.format ? `<span class="deck-format">${data.format}</span>` : ''}
+          <span class="deck-total">${fmtPrice(data.total_price)}</span>
+        </div>`;
+
+        if (data.avatar) {
+          html += renderDeckSection('Avatar', [data.avatar]);
+        }
+        html += renderDeckSection('Spellbook', data.decklist);
+        if (data.sideboard && data.sideboard.length > 0) {
+          html += renderDeckSection('Sideboard', data.sideboard);
+        }
+
+        deckResults.innerHTML = html;
+      })
+      .catch(err => {
+        deckResults.innerHTML = '';
+        deckError.textContent = err.message;
+      })
+      .finally(() => {
+        deckLookupBtn.disabled = false;
+      });
+  });
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1081 @@
+#!/usr/bin/env python3
+"""Build static site for GitHub Pages deployment.
+
+Reads CSV snapshots from data/ and generates:
+  docs/index.html   - Self-contained static HTML
+  docs/data/cards.json    - Latest card data
+  docs/data/filters.json  - Filter options
+  docs/data/history.json  - Price history keyed by name|expansion|finish
+  docs/data/sealed-stats.json - Sealed aggregate stats
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+from datetime import datetime
+
+import pandas as pd
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+DOCS_DIR = os.path.join(SCRIPT_DIR, "docs")
+DOCS_DATA_DIR = os.path.join(DOCS_DIR, "data")
+
+TS_RE = re.compile(r"^(\d{8}_\d{4})_sorcery_prices\.csv$")
+SEALED_NAME_RE = re.compile(
+    r"\b(?:booster|box|case|pack|display|starter|precon|deck)\b", re.I
+)
+SEALED_CASE_RE = re.compile(r"\b(?:box\s*case|booster\s*case)\b|case\b", re.I)
+SEALED_BOX_RE = re.compile(r"\b(?:booster\s*box)\b", re.I)
+SEALED_PLEDGE_RE = re.compile(r"\bpledge\s*pack\b", re.I)
+SEALED_PACK_RE = re.compile(r"\b(?:booster\s*pack|pack)\b", re.I)
+SEALED_DECK_RE = re.compile(r"\b(?:precon|deck)\b", re.I)
+PRODUCT_ID_RE = re.compile(r"/product/(\d+)")
+TCGPLAYER_CDN = "https://tcgplayer-cdn.tcgplayer.com/product/{pid}_in_1000x1000.jpg"
+
+RARITY_ORDER = {"Ordinary": 0, "Exceptional": 1, "Elite": 2, "Unique": 3, "Promo": 4}
+
+
+def _is_sealed(name: str) -> bool:
+    return bool(SEALED_NAME_RE.search(str(name)))
+
+
+def _sealed_type(name: str) -> str:
+    n = str(name)
+    if SEALED_CASE_RE.search(n):
+        return "Case"
+    if SEALED_BOX_RE.search(n):
+        return "Box"
+    if SEALED_PLEDGE_RE.search(n):
+        return "Pledge Pack"
+    if SEALED_PACK_RE.search(n):
+        return "Pack"
+    if SEALED_DECK_RE.search(n):
+        return "Deck"
+    if "box topper" in n.lower():
+        return "Box Topper"
+    return "Other"
+
+
+def _image_url(art_link: str) -> str:
+    m = PRODUCT_ID_RE.search(str(art_link))
+    if m:
+        return TCGPLAYER_CDN.format(pid=m.group(1))
+    return ""
+
+
+def _safe(val):
+    if pd.isna(val):
+        return None
+    return val
+
+
+def _discover_snapshots() -> list[tuple[str, str]]:
+    pairs = []
+    for fname in os.listdir(DATA_DIR):
+        m = TS_RE.match(fname)
+        if m:
+            ts_raw = m.group(1)
+            label = datetime.strptime(ts_raw, "%Y%m%d_%H%M").strftime("%m/%d %H:%M")
+            pairs.append((label, os.path.join(DATA_DIR, fname)))
+    pairs.sort()
+    return pairs
+
+
+def _normalize_name(name: str) -> str:
+    n = name.lower()
+    n = n.replace("\u2019", "").replace("\u2018", "")
+    n = n.replace("\u201c", "").replace("\u201d", "")
+    n = n.replace("'", "").replace("'", "")
+    n = n.replace("-", " ")
+    n = " ".join(n.split())
+    return n
+
+
+def load_data():
+    snapshots = _discover_snapshots()
+    if not snapshots:
+        raise RuntimeError("No CSV snapshots found in data/")
+
+    frames = []
+    labels = []
+    for label, path in snapshots:
+        df = pd.read_csv(path)
+        df["snapshot"] = label
+        frames.append(df)
+        labels.append(label)
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["price"] = pd.to_numeric(combined["price"], errors="coerce")
+    combined["category"] = combined["name"].apply(
+        lambda n: "Sealed" if _is_sealed(n) else "Cards"
+    )
+    combined["sealed_type"] = combined["name"].apply(
+        lambda n: _sealed_type(n) if _is_sealed(n) else ""
+    )
+
+    latest_snap = labels[-1]
+    latest = combined[combined["snapshot"] == latest_snap].copy()
+    latest["image_url"] = latest["art_link"].apply(_image_url)
+    latest["_name_norm"] = latest["name"].apply(_normalize_name)
+    latest = latest.reset_index(drop=True)
+
+    return labels, combined, latest
+
+
+def build_cards_json(latest: pd.DataFrame) -> list[dict]:
+    cards = []
+    for _, row in latest.iterrows():
+        cards.append({
+            "name": row["name"],
+            "price": _safe(row["price"]),
+            "expansion": _safe(row["expansion"]) or "",
+            "finish": _safe(row["finish"]) or "",
+            "rarity": _safe(row.get("rarity", "")) or "",
+            "category": _safe(row.get("category", "Cards")) or "Cards",
+            "sealed_type": _safe(row.get("sealed_type", "")) or "",
+            "art_link": _safe(row.get("art_link", "")) or "",
+            "image_url": _safe(row.get("image_url", "")) or "",
+            "_name_norm": _safe(row.get("_name_norm", "")) or "",
+        })
+    return cards
+
+
+def build_filters_json(latest: pd.DataFrame) -> dict:
+    sealed_types = latest.loc[
+        latest["sealed_type"] != "", "sealed_type"
+    ].dropna().unique().tolist()
+    return {
+        "categories": sorted(latest["category"].dropna().unique().tolist()),
+        "sealed_types": sorted(sealed_types),
+        "rarities": sorted(latest["rarity"].dropna().unique().tolist()),
+        "expansions": sorted(latest["expansion"].dropna().unique().tolist()),
+        "finishes": sorted(latest["finish"].dropna().unique().tolist()),
+    }
+
+
+def build_history_json(labels: list[str], combined: pd.DataFrame) -> dict:
+    """Build price history keyed by 'name|expansion|finish'."""
+    history = {}
+    # Group by name, expansion, finish
+    grouped = combined.groupby(["name", "expansion", "finish"])
+    for (name, expansion, finish), group in grouped:
+        key = f"{name}|{expansion}|{finish}"
+        snap_prices = dict(zip(group["snapshot"], group["price"]))
+        prices = []
+        for lbl in labels:
+            p = snap_prices.get(lbl)
+            if p is not None and pd.notna(p):
+                prices.append(round(float(p), 2))
+            else:
+                prices.append(None)
+        history[key] = prices
+    return {"labels": labels, "history": history}
+
+
+def build_sealed_stats_json(labels: list[str], combined: pd.DataFrame,
+                             latest: pd.DataFrame) -> dict:
+    sealed = latest[latest["category"] == "Sealed"].copy()
+    if sealed.empty:
+        return {"count": 0, "products": []}
+
+    sealed_sorted = sealed.sort_values("price", ascending=False, na_position="last")
+    products = []
+    for _, row in sealed_sorted.iterrows():
+        products.append({
+            "name": row["name"],
+            "price": _safe(row["price"]),
+            "expansion": _safe(row["expansion"]) or "",
+            "finish": _safe(row["finish"]) or "",
+            "rarity": _safe(row.get("rarity", "")) or "",
+            "sealed_type": _safe(row.get("sealed_type", "")) or "",
+            "image_url": _safe(row.get("image_url", "")) or "",
+            "art_link": _safe(row.get("art_link", "")) or "",
+        })
+
+    prices = sealed["price"].dropna()
+    by_expansion = (
+        sealed.groupby("expansion")["price"]
+        .agg(["mean", "min", "max", "count"])
+        .reset_index()
+        .sort_values("mean", ascending=False)
+    )
+    expansion_stats = []
+    for _, r in by_expansion.iterrows():
+        expansion_stats.append({
+            "expansion": r["expansion"],
+            "avg_price": round(r["mean"], 2),
+            "min_price": round(r["min"], 2),
+            "max_price": round(r["max"], 2),
+            "count": int(r["count"]),
+        })
+
+    sealed_all = combined[combined["category"] == "Sealed"].copy()
+    sealed_all["sealed_type"] = sealed_all["name"].apply(
+        lambda n: _sealed_type(n) if _is_sealed(n) else ""
+    )
+    avg_by_snap = sealed_all.groupby("snapshot")["price"].mean()
+    history_prices = [
+        round(float(avg_by_snap.get(lbl)), 2)
+        if lbl in avg_by_snap and pd.notna(avg_by_snap.get(lbl)) else None
+        for lbl in labels
+    ]
+
+    history_by_type = {}
+    for stype in sealed_all["sealed_type"].unique():
+        if not stype:
+            continue
+        type_df = sealed_all[sealed_all["sealed_type"] == stype]
+        type_avg = type_df.groupby("snapshot")["price"].mean()
+        history_by_type[stype] = [
+            round(float(type_avg.get(lbl)), 2)
+            if lbl in type_avg and pd.notna(type_avg.get(lbl)) else None
+            for lbl in labels
+        ]
+
+    return {
+        "count": len(sealed),
+        "total_value": round(float(prices.sum()), 2) if not prices.empty else 0,
+        "avg_price": round(float(prices.mean()), 2) if not prices.empty else 0,
+        "min_price": round(float(prices.min()), 2) if not prices.empty else 0,
+        "max_price": round(float(prices.max()), 2) if not prices.empty else 0,
+        "by_expansion": expansion_stats,
+        "products": products,
+        "history_labels": labels,
+        "history_avg_prices": history_prices,
+        "history_by_type": history_by_type,
+    }
+
+
+def generate_static_html() -> str:
+    """Generate the self-contained static HTML for GitHub Pages."""
+    return STATIC_HTML
+
+
+def main():
+    print("Loading CSV snapshots...")
+    labels, combined, latest = load_data()
+    print(f"  {len(labels)} snapshots, {len(latest)} items in latest")
+
+    # Create output dirs
+    os.makedirs(DOCS_DATA_DIR, exist_ok=True)
+
+    # Build JSON data files
+    print("Building cards.json...")
+    cards = build_cards_json(latest)
+    with open(os.path.join(DOCS_DATA_DIR, "cards.json"), "w") as f:
+        json.dump(cards, f, separators=(",", ":"))
+    print(f"  {len(cards)} cards")
+
+    print("Building filters.json...")
+    filters = build_filters_json(latest)
+    with open(os.path.join(DOCS_DATA_DIR, "filters.json"), "w") as f:
+        json.dump(filters, f, separators=(",", ":"))
+
+    print("Building history.json...")
+    history = build_history_json(labels, combined)
+    with open(os.path.join(DOCS_DATA_DIR, "history.json"), "w") as f:
+        json.dump(history, f, separators=(",", ":"))
+    print(f"  {len(history['history'])} price series")
+
+    print("Building sealed-stats.json...")
+    sealed_stats = build_sealed_stats_json(labels, combined, latest)
+    with open(os.path.join(DOCS_DATA_DIR, "sealed-stats.json"), "w") as f:
+        json.dump(sealed_stats, f, separators=(",", ":"))
+
+    print("Writing index.html...")
+    with open(os.path.join(DOCS_DIR, "index.html"), "w") as f:
+        f.write(generate_static_html())
+
+    # Report sizes
+    for fname in ["cards.json", "filters.json", "history.json", "sealed-stats.json"]:
+        fpath = os.path.join(DOCS_DATA_DIR, fname)
+        size = os.path.getsize(fpath)
+        print(f"  {fname}: {size / 1024:.1f} KB")
+    html_size = os.path.getsize(os.path.join(DOCS_DIR, "index.html"))
+    print(f"  index.html: {html_size / 1024:.1f} KB")
+    print("Done! Static site built in docs/")
+
+
+# ── Static HTML template ─────────────────────────────────────────────
+
+STATIC_HTML = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sorcery TCG Card Browser</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #12100e;
+    --surface: #1e1a15;
+    --border: #3a3228;
+    --text: #e8e0d4;
+    --text-dim: #9a8e7e;
+    --accent: #c9973e;
+    --accent-hover: #e0b050;
+    --accent-glow: rgba(201,151,62,0.15);
+    --green: #7ebd5a;
+    --red: #d45050;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  .topbar {
+    position: sticky; top: 0; z-index: 100;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 12px 20px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  }
+  .topbar h1 { font-size: 1.1rem; color: var(--accent); margin-right: 12px; white-space: nowrap; }
+  .topbar input[type="text"] {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 12px; border-radius: 6px; font-size: 0.9rem; width: 200px;
+  }
+  .topbar input[type="text"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+  .topbar select {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 8px; border-radius: 6px; font-size: 0.85rem; cursor: pointer;
+  }
+  .topbar select:focus { outline: none; border-color: var(--accent); }
+  .topbar .sort-toggle {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;
+  }
+  .topbar .sort-toggle:hover { border-color: var(--accent); }
+  .topbar .card-count { margin-left: auto; color: var(--text-dim); font-size: 0.85rem; white-space: nowrap; }
+
+  .zoom-wrap { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--text-dim); }
+  .zoom-wrap input[type="range"] { width: 90px; accent-color: var(--accent); cursor: pointer; }
+
+  .accent-btn {
+    background: var(--accent); border: none; color: #1a1510;
+    padding: 6px 14px; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+  }
+  .accent-btn:hover { background: var(--accent-hover); }
+
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-width, 210px), 1fr));
+    gap: 16px; padding: 20px; max-width: 1600px; margin: 0 auto;
+  }
+  .card {
+    background: var(--surface); border: 2px solid var(--border); border-radius: 10px;
+    overflow: hidden; cursor: pointer; transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+  }
+  .card:hover { transform: translateY(-4px); }
+  .card.rarity-ordinary { border-color: #5a5040; }
+  .card.rarity-ordinary:hover { border-color: #8a7e6e; box-shadow: 0 4px 12px rgba(138,126,110,0.2); }
+  .card.rarity-exceptional { border-color: #4a7a30; }
+  .card.rarity-exceptional:hover { border-color: #6cb048; box-shadow: 0 4px 12px rgba(108,176,72,0.3); }
+  .card.rarity-elite { border-color: #7040a0; }
+  .card.rarity-elite:hover { border-color: #a070d0; box-shadow: 0 4px 12px rgba(160,112,208,0.3); }
+  .card.rarity-unique { border-color: #c9973e; }
+  .card.rarity-unique:hover { border-color: #e0b050; box-shadow: 0 4px 12px rgba(224,176,80,0.35); }
+  .card.rarity-promo { border-color: #2a8a8a; }
+  .card.rarity-promo:hover { border-color: #40c0c0; box-shadow: 0 4px 12px rgba(64,192,192,0.3); }
+  .card .img-wrap { width: 100%; aspect-ratio: 5/7; background: #0e0c0a; position: relative; overflow: hidden; }
+  .card .img-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card .foil-overlay {
+    position: absolute; inset: 0;
+    background: linear-gradient(135deg, rgba(255,255,255,0) 0%, rgba(255,220,150,0.12) 30%, rgba(200,180,255,0.10) 50%, rgba(255,200,140,0.12) 70%, rgba(255,255,255,0) 100%);
+    pointer-events: none;
+  }
+  .card .info { padding: 10px 12px; }
+  .card .card-name {
+    font-size: 0.85rem; font-weight: 600; margin-bottom: 6px; line-height: 1.2;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .card .card-price { font-size: 1rem; font-weight: 700; color: var(--green); margin-bottom: 6px; }
+  .card .badges { display: flex; flex-wrap: wrap; gap: 4px; }
+  .badge { font-size: 0.7rem; padding: 2px 7px; border-radius: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+  .badge-expansion { background: #2a2418; color: var(--accent); border: 1px solid #3a3220; }
+  .badge-rarity-ordinary { background: #2a2620; color: #a09080; }
+  .badge-rarity-exceptional { background: #1e2e16; color: #7ebd5a; }
+  .badge-rarity-elite { background: #28183e; color: #b388ff; }
+  .badge-rarity-unique { background: #3a2e18; color: #e0b050; }
+  .badge-foil { background: linear-gradient(90deg, #3a2e20, #2a2e3a); color: #d4c8a0; }
+  .badge-sealed-type { background: #1e2a28; color: #60b0a0; border: 1px solid #2a3a38; }
+
+  .sentinel { height: 60px; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 0.9rem; }
+  .spinner { width: 24px; height: 24px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 10px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.80); z-index: 200; align-items: center; justify-content: center; padding: 20px; }
+  .modal-backdrop.open { display: flex; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; max-width: 800px; width: 100%; max-height: 90vh; overflow-y: auto; position: relative; }
+  .modal-close { position: absolute; top: 12px; right: 16px; background: none; border: none; color: var(--text-dim); font-size: 1.5rem; cursor: pointer; z-index: 10; line-height: 1; }
+  .modal-close:hover { color: var(--text); }
+  .modal-body { display: flex; gap: 20px; padding: 24px; }
+  .modal-img { flex: 0 0 260px; aspect-ratio: 5/7; border-radius: 8px; overflow: hidden; background: #0e0c0a; }
+  .modal-img img { width: 100%; height: 100%; object-fit: cover; }
+  .modal-details { flex: 1; min-width: 0; }
+  .modal-details h2 { font-size: 1.3rem; margin-bottom: 12px; }
+  .modal-details .detail-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+  .modal-details .detail-label { color: var(--text-dim); }
+  .modal-details .detail-value { font-weight: 600; }
+  .modal-details .price-big { font-size: 1.8rem; font-weight: 700; color: var(--green); margin: 12px 0; }
+  .modal-details .tcg-link { display: inline-block; margin-top: 10px; padding: 8px 16px; background: var(--accent); color: #1a1510; text-decoration: none; border-radius: 6px; font-size: 0.85rem; font-weight: 600; }
+  .modal-details .tcg-link:hover { background: var(--accent-hover); }
+  .modal-chart { padding: 0 24px 24px; }
+  .modal-chart h3 { font-size: 0.95rem; color: var(--text-dim); margin-bottom: 10px; }
+  .modal-chart canvas { width: 100% !important; max-height: 250px; }
+
+  /* Deck modal */
+  .deck-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; max-width: 960px; width: 100%; max-height: 90vh; overflow-y: auto; position: relative; display: flex; flex-direction: column; }
+  .deck-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 24px 0; }
+  .deck-modal-header h2 { font-size: 1.2rem; }
+  .deck-input-area { padding: 16px 24px; display: flex; flex-direction: column; gap: 12px; }
+  .deck-input-area textarea {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 10px 14px; font-size: 0.85rem; font-family: monospace;
+    resize: vertical; min-height: 120px;
+  }
+  .deck-input-area textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+  .deck-input-area textarea::placeholder { color: var(--text-dim); }
+  .deck-input-area button {
+    background: var(--accent); border: none; color: #1a1510;
+    padding: 10px 20px; border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; white-space: nowrap; align-self: flex-start;
+  }
+  .deck-input-area button:hover { background: var(--accent-hover); }
+  .deck-error { padding: 0 24px; color: var(--red); font-size: 0.85rem; }
+  .deck-results { padding: 0 24px 24px; }
+  .deck-name-bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--bg); border-radius: 8px; margin-bottom: 12px; border: 1px solid var(--border); }
+  .deck-name-bar .deck-title { font-size: 1.05rem; font-weight: 700; color: var(--accent); flex: 1; }
+  .deck-name-bar .deck-total { font-size: 1.3rem; font-weight: 700; color: var(--green); }
+  .deck-section-label { font-size: 0.8rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; margin: 16px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .deck-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+  .deck-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+  .deck-card.not-found { opacity: 0.5; border-color: var(--red); }
+  .deck-card .deck-card-img { width: 100%; aspect-ratio: 5/7; background: #0e0c0a; overflow: hidden; }
+  .deck-card .deck-card-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .deck-card .deck-card-info { padding: 8px 10px; font-size: 0.8rem; }
+  .deck-card .deck-card-name { font-weight: 600; margin-bottom: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .deck-card .deck-card-qty { color: var(--text-dim); }
+  .deck-card .deck-card-price { color: var(--green); font-weight: 700; }
+  .deck-card .deck-card-notfound { color: var(--red); font-size: 0.75rem; }
+
+  /* Sealed inline */
+  .sealed-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; padding: 0 20px 16px; max-width: 1600px; margin: 0 auto; }
+  .sealed-stat-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; text-align: center; }
+  .sealed-stat-box .stat-value { font-size: 1.3rem; font-weight: 700; color: var(--accent); }
+  .sealed-stat-box .stat-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; margin-top: 4px; }
+  .sealed-chart-wrap { padding: 0 20px 16px; max-width: 1600px; margin: 0 auto; }
+  .sealed-chart-wrap h3 { font-size: 0.9rem; color: var(--text-dim); margin-bottom: 8px; }
+  .sealed-chart-wrap canvas { width: 100% !important; max-height: 200px; }
+  .sealed-expansion-table { width: 100%; border-collapse: collapse; margin: 0 0 16px; font-size: 0.85rem; }
+  .sealed-expansion-table th { text-align: left; padding: 6px 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; }
+  .sealed-expansion-table td { padding: 6px 12px; border-bottom: 1px solid var(--border); }
+  .sealed-expansion-table tr:hover { background: var(--bg); }
+  .sealed-inline-section { max-width: 1600px; margin: 0 auto; padding: 0 20px 16px; }
+  .sealed-type-toggles { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 20px 12px; max-width: 1600px; margin: 0 auto; }
+  .sealed-type-toggle { padding: 4px 12px; border-radius: 5px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: var(--bg); color: var(--text-dim); transition: all 0.15s; }
+  .sealed-type-toggle.active { border-color: var(--accent); background: var(--accent); color: #1a1510; }
+
+  @media (max-width: 700px) {
+    .modal-body { flex-direction: column; }
+    .modal-img { flex: none; width: 100%; max-width: 300px; margin: 0 auto; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 12px; }
+    .deck-card-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Sorcery TCG</h1>
+  <input type="text" id="searchInput" placeholder="Search cards...">
+  <select id="categoryFilter"><option value="">All Categories</option></select>
+  <select id="expansionFilter"><option value="">All Expansions</option></select>
+  <select id="rarityFilter"><option value="">All Rarities</option></select>
+  <select id="finishFilter"><option value="">All Finishes</option></select>
+  <select id="sealedTypeFilter" style="display:none"><option value="">All Types</option></select>
+  <select id="sortSelect">
+    <option value="name">Sort: Name</option>
+    <option value="price">Sort: Price</option>
+    <option value="rarity">Sort: Rarity</option>
+    <option value="expansion">Sort: Expansion</option>
+  </select>
+  <button class="sort-toggle" id="orderToggle" title="Toggle sort order">&#9650; Asc</button>
+  <div class="zoom-wrap">
+    <span>Zoom</span>
+    <input type="range" id="zoomSlider" min="120" max="350" value="210" step="10">
+  </div>
+  <button class="accent-btn" id="deckBtn">Deck</button>
+  <button class="accent-btn" id="sealedToggleBtn">Sealed</button>
+  <span class="card-count" id="cardCount"></span>
+</div>
+
+<div id="sealedStatsSection" style="display:none">
+  <div id="sealedOverview" class="sealed-overview"></div>
+  <div id="sealedChartWrap" class="sealed-chart-wrap" style="display:none">
+    <h3>Average Sealed Price Over Time</h3>
+    <canvas id="sealedPriceChart"></canvas>
+  </div>
+  <div id="sealedTableWrap" class="sealed-inline-section"></div>
+  <div id="sealedTypeToggles" class="sealed-type-toggles"></div>
+</div>
+
+<div class="grid" id="cardGrid"></div>
+<div class="sentinel" id="sentinel">
+  <div class="spinner"></div> Loading cards...
+</div>
+
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal" id="modal">
+    <button class="modal-close" id="modalClose">&times;</button>
+    <div class="modal-body">
+      <div class="modal-img" id="modalImg"></div>
+      <div class="modal-details" id="modalDetails"></div>
+    </div>
+    <div class="modal-chart">
+      <h3>Price History</h3>
+      <canvas id="priceChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="deckBackdrop">
+  <div class="deck-modal">
+    <div class="deck-modal-header">
+      <h2>Deck Price Calculator</h2>
+      <button class="modal-close" id="deckClose">&times;</button>
+    </div>
+    <div class="deck-input-area">
+      <textarea id="deckTextInput" placeholder="Paste decklist (one card per line):&#10;1 Merlin&#10;2 Lightning Bolt&#10;1x Fireball&#10;&#10;Sideboard:&#10;1 Counterspell"></textarea>
+      <button id="deckLookup">Calculate</button>
+    </div>
+    <div class="deck-error" id="deckError"></div>
+    <div class="deck-results" id="deckResults"></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  // ── All data loaded upfront ─────────────────────
+  let ALL_CARDS = [];
+  let FILTERS = {};
+  let HISTORY = {};
+  let HISTORY_LABELS = [];
+  let SEALED_STATS = {};
+  let dataReady = false;
+
+  // ── State ───────────────────────────────────────
+  let page = 1;
+  const perPage = 50;
+  let currentOrder = 'asc';
+  let priceChart = null;
+  let debounceTimer = null;
+  let sealedMode = false;
+  let sealedChart = null;
+
+  const RARITY_ORDER = { 'Ordinary': 0, 'Exceptional': 1, 'Elite': 2, 'Unique': 3, 'Promo': 4 };
+
+  const grid = document.getElementById('cardGrid');
+  const sentinel = document.getElementById('sentinel');
+  const searchInput = document.getElementById('searchInput');
+  const categoryFilter = document.getElementById('categoryFilter');
+  const expansionFilter = document.getElementById('expansionFilter');
+  const rarityFilter = document.getElementById('rarityFilter');
+  const finishFilter = document.getElementById('finishFilter');
+  const sealedTypeFilter = document.getElementById('sealedTypeFilter');
+  const sortSelect = document.getElementById('sortSelect');
+  const orderToggle = document.getElementById('orderToggle');
+  const zoomSlider = document.getElementById('zoomSlider');
+  const cardCount = document.getElementById('cardCount');
+  const modalBackdrop = document.getElementById('modalBackdrop');
+  const sealedToggleBtn = document.getElementById('sealedToggleBtn');
+  const sealedStatsSection = document.getElementById('sealedStatsSection');
+  const sealedTypeFilters = new Set(['Box', 'Pack']);
+
+  const cardFilterEls = [categoryFilter, expansionFilter, rarityFilter, finishFilter, sealedTypeFilter];
+
+  // ── Load all data ───────────────────────────────
+  Promise.all([
+    fetch('./data/cards.json').then(r => r.json()),
+    fetch('./data/filters.json').then(r => r.json()),
+    fetch('./data/history.json').then(r => r.json()),
+    fetch('./data/sealed-stats.json').then(r => r.json()),
+  ]).then(([cards, filters, history, sealedStats]) => {
+    ALL_CARDS = cards;
+    FILTERS = filters;
+    HISTORY = history.history;
+    HISTORY_LABELS = history.labels;
+    SEALED_STATS = sealedStats;
+    dataReady = true;
+
+    // Populate filter dropdowns
+    filters.categories.forEach(v => categoryFilter.add(new Option(v, v)));
+    filters.expansions.forEach(v => expansionFilter.add(new Option(v, v)));
+    filters.rarities.forEach(v => rarityFilter.add(new Option(v, v)));
+    filters.finishes.forEach(v => finishFilter.add(new Option(v, v)));
+    (filters.sealed_types || []).forEach(v => sealedTypeFilter.add(new Option(v, v)));
+
+    categoryFilter.value = 'Cards';
+    finishFilter.value = 'Standard';
+    renderCards();
+  });
+
+  // ── Client-side filtering & sorting ─────────────
+  function getFilteredCards() {
+    let cards = ALL_CARDS;
+    const search = searchInput.value.trim().toLowerCase();
+    if (search) cards = cards.filter(c => c.name.toLowerCase().includes(search));
+
+    if (sealedMode) {
+      cards = cards.filter(c => c.category === 'Sealed');
+      if (sealedTypeFilters.size > 0) cards = cards.filter(c => sealedTypeFilters.has(c.sealed_type || 'Other'));
+    } else {
+      const cat = categoryFilter.value;
+      if (cat) cards = cards.filter(c => c.category === cat);
+      const rar = rarityFilter.value;
+      if (rar) cards = cards.filter(c => c.rarity === rar);
+      const exp = expansionFilter.value;
+      if (exp) cards = cards.filter(c => c.expansion === exp);
+      const fin = finishFilter.value;
+      if (fin) cards = cards.filter(c => c.finish === fin);
+      const st = sealedTypeFilter.value;
+      if (st) cards = cards.filter(c => c.sealed_type === st);
+    }
+
+    // Sort
+    const sortBy = sortSelect.value;
+    const asc = currentOrder === 'asc';
+    cards = [...cards];
+    if (sortBy === 'price') {
+      cards.sort((a, b) => {
+        const pa = a.price ?? (asc ? Infinity : -Infinity);
+        const pb = b.price ?? (asc ? Infinity : -Infinity);
+        return asc ? pa - pb : pb - pa;
+      });
+    } else if (sortBy === 'rarity') {
+      cards.sort((a, b) => {
+        const ra = RARITY_ORDER[a.rarity] ?? 99;
+        const rb = RARITY_ORDER[b.rarity] ?? 99;
+        const diff = asc ? ra - rb : rb - ra;
+        return diff !== 0 ? diff : a.name.localeCompare(b.name);
+      });
+    } else if (sortBy === 'expansion') {
+      cards.sort((a, b) => {
+        const diff = a.expansion.localeCompare(b.expansion);
+        return asc ? diff || a.name.localeCompare(b.name) : -diff || a.name.localeCompare(b.name);
+      });
+    } else {
+      cards.sort((a, b) => asc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name));
+    }
+    return cards;
+  }
+
+  function renderCards() {
+    if (!dataReady) return;
+    const filtered = getFilteredCards();
+    const slice = filtered.slice(0, page * perPage);
+
+    grid.innerHTML = '';
+    slice.forEach(c => grid.appendChild(createCard(c)));
+    cardCount.textContent = filtered.length + (sealedMode ? ' products' : ' cards');
+
+    if (slice.length < filtered.length) {
+      sentinel.style.display = 'flex';
+    } else {
+      sentinel.style.display = 'none';
+    }
+  }
+
+  function resetAndRender() {
+    page = 1;
+    renderCards();
+  }
+
+  // ── Helpers ─────────────────────────────────────
+  function fmtPrice(p) { if (p == null) return 'N/A'; return '$' + Number(p).toFixed(2); }
+
+  function rarityClass(r) {
+    if (!r) return 'badge-rarity-ordinary';
+    switch (r.toLowerCase()) {
+      case 'exceptional': return 'badge-rarity-exceptional';
+      case 'elite': return 'badge-rarity-elite';
+      case 'unique': return 'badge-rarity-unique';
+      default: return 'badge-rarity-ordinary';
+    }
+  }
+
+  function rarityCardClass(r) {
+    if (!r) return 'rarity-ordinary';
+    switch (r.toLowerCase()) {
+      case 'exceptional': return 'rarity-exceptional';
+      case 'elite': return 'rarity-elite';
+      case 'unique': return 'rarity-unique';
+      case 'promo': return 'rarity-promo';
+      default: return 'rarity-ordinary';
+    }
+  }
+
+  function createCard(card) {
+    const el = document.createElement('div');
+    el.className = 'card ' + rarityCardClass(card.rarity);
+    const isFoil = (card.finish || '').toLowerCase() === 'foil';
+    const foilOverlay = isFoil ? '<div class="foil-overlay"></div>' : '';
+    const isSealed = card.category === 'Sealed';
+    const sealedBadge = isSealed && card.sealed_type ? '<span class="badge badge-sealed-type">' + card.sealed_type + '</span>' : '';
+
+    el.innerHTML =
+      '<div class="img-wrap">' +
+        '<img src="' + (card.image_url || '') + '" alt="' + card.name + '" loading="lazy" onerror="this.style.display=\'none\'">' +
+        foilOverlay +
+      '</div>' +
+      '<div class="info">' +
+        '<div class="card-name">' + card.name + '</div>' +
+        '<div class="card-price">' + fmtPrice(card.price) + '</div>' +
+        '<div class="badges">' +
+          '<span class="badge badge-expansion">' + card.expansion + '</span>' +
+          (isSealed ? sealedBadge : '<span class="badge ' + rarityClass(card.rarity) + '">' + (card.rarity || 'Unknown') + '</span>') +
+          (isFoil ? '<span class="badge badge-foil">Foil</span>' : '') +
+        '</div>' +
+      '</div>';
+
+    el.addEventListener('click', function() { openModal(card); });
+    return el;
+  }
+
+  // ── Sealed toggle ───────────────────────────────
+  function enterSealedMode() {
+    sealedMode = true;
+    sealedToggleBtn.textContent = 'Cards';
+    cardFilterEls.forEach(function(el) { el.style.display = 'none'; });
+    sealedStatsSection.style.display = 'block';
+    renderSealedInline(SEALED_STATS);
+    renderSealedChartInline(SEALED_STATS);
+    resetAndRender();
+  }
+
+  function exitSealedMode() {
+    sealedMode = false;
+    sealedToggleBtn.textContent = 'Sealed';
+    cardFilterEls.forEach(function(el) { el.style.display = ''; });
+    sealedTypeFilter.style.display = categoryFilter.value === 'Sealed' ? '' : 'none';
+    sealedStatsSection.style.display = 'none';
+    if (sealedChart) { sealedChart.destroy(); sealedChart = null; }
+    resetAndRender();
+  }
+
+  sealedToggleBtn.addEventListener('click', function() {
+    if (sealedMode) exitSealedMode(); else enterSealedMode();
+  });
+
+  function renderSealedInline(data) {
+    var overview = document.getElementById('sealedOverview');
+    overview.innerHTML =
+      '<div class="sealed-stat-box"><div class="stat-value">' + data.count + '</div><div class="stat-label">Products</div></div>' +
+      '<div class="sealed-stat-box"><div class="stat-value">' + fmtPrice(data.total_value) + '</div><div class="stat-label">Total Value</div></div>' +
+      '<div class="sealed-stat-box"><div class="stat-value">' + fmtPrice(data.avg_price) + '</div><div class="stat-label">Avg Price</div></div>' +
+      '<div class="sealed-stat-box"><div class="stat-value">' + fmtPrice(data.min_price) + '</div><div class="stat-label">Min Price</div></div>' +
+      '<div class="sealed-stat-box"><div class="stat-value">' + fmtPrice(data.max_price) + '</div><div class="stat-label">Max Price</div></div>';
+
+    var chartWrap = document.getElementById('sealedChartWrap');
+    chartWrap.style.display = (data.history_labels && data.history_labels.length > 0) ? '' : 'none';
+
+    var tableWrap = document.getElementById('sealedTableWrap');
+    if (data.by_expansion && data.by_expansion.length > 0) {
+      var html = '<table class="sealed-expansion-table"><thead><tr><th>Expansion</th><th>Count</th><th>Avg</th><th>Min</th><th>Max</th></tr></thead><tbody>';
+      data.by_expansion.forEach(function(e) {
+        html += '<tr><td>' + e.expansion + '</td><td>' + e.count + '</td><td style="color:var(--green)">' + fmtPrice(e.avg_price) + '</td><td>' + fmtPrice(e.min_price) + '</td><td>' + fmtPrice(e.max_price) + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      tableWrap.innerHTML = html;
+    } else { tableWrap.innerHTML = ''; }
+
+    var togglesWrap = document.getElementById('sealedTypeToggles');
+    var types = [];
+    var seen = {};
+    data.products.forEach(function(p) { var t = p.sealed_type || 'Other'; if (!seen[t]) { seen[t] = true; types.push(t); } });
+    types.sort();
+    var thtml = '';
+    types.forEach(function(t) {
+      thtml += '<button class="sealed-type-toggle' + (sealedTypeFilters.has(t) ? ' active' : '') + '" data-type="' + t + '">' + t + '</button>';
+    });
+    togglesWrap.innerHTML = thtml;
+    togglesWrap.querySelectorAll('.sealed-type-toggle').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var t = btn.dataset.type;
+        if (sealedTypeFilters.has(t)) sealedTypeFilters.delete(t); else sealedTypeFilters.add(t);
+        btn.classList.toggle('active');
+        resetAndRender();
+        renderSealedChartInline(SEALED_STATS);
+      });
+    });
+  }
+
+  function getFilteredChartPrices(data) {
+    if (!data.history_by_type || sealedTypeFilters.size === 0) return data.history_avg_prices;
+    var labels = data.history_labels;
+    var activeTypes = [];
+    sealedTypeFilters.forEach(function(t) { if (data.history_by_type[t]) activeTypes.push(t); });
+    if (activeTypes.length === 0) return data.history_avg_prices;
+    return labels.map(function(_, i) {
+      var sum = 0, count = 0;
+      activeTypes.forEach(function(t) { var val = data.history_by_type[t][i]; if (val != null) { sum += val; count++; } });
+      return count > 0 ? Math.round(sum / count * 100) / 100 : null;
+    });
+  }
+
+  function renderSealedChartInline(data) {
+    if (!data.history_labels) return;
+    var prices = getFilteredChartPrices(data);
+    if (!prices) return;
+    var canvas = document.getElementById('sealedPriceChart');
+    if (!canvas) return;
+    var chartWrap = document.getElementById('sealedChartWrap');
+    chartWrap.style.display = data.history_labels.length > 0 ? '' : 'none';
+    var ctx = canvas.getContext('2d');
+    if (sealedChart) sealedChart.destroy();
+    sealedChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: data.history_labels, datasets: [{ label: 'Avg Price ($)', data: prices, borderColor: '#c9973e', backgroundColor: 'rgba(201,151,62,0.1)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#e0b050', spanGaps: true }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) { return '$' + (ctx.parsed.y != null ? ctx.parsed.y.toFixed(2) : 'N/A'); } } } },
+        scales: {
+          x: { ticks: { color: '#9a8e7e', maxRotation: 45, font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+          y: { ticks: { color: '#9a8e7e', callback: function(v) { return '$' + v.toFixed(2); } }, grid: { color: 'rgba(255,255,255,0.04)' } }
+        }
+      }
+    });
+  }
+
+  // ── Event listeners ─────────────────────────────
+  searchInput.addEventListener('input', function() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(resetAndRender, 300);
+  });
+
+  [categoryFilter, expansionFilter, rarityFilter, finishFilter, sealedTypeFilter, sortSelect].forEach(function(el) {
+    el.addEventListener('change', resetAndRender);
+  });
+
+  categoryFilter.addEventListener('change', function() {
+    sealedTypeFilter.style.display = categoryFilter.value === 'Sealed' ? '' : 'none';
+    if (categoryFilter.value !== 'Sealed') sealedTypeFilter.value = '';
+  });
+
+  orderToggle.addEventListener('click', function() {
+    currentOrder = currentOrder === 'asc' ? 'desc' : 'asc';
+    orderToggle.innerHTML = currentOrder === 'asc' ? '&#9650; Asc' : '&#9660; Desc';
+    resetAndRender();
+  });
+
+  // Infinite scroll
+  var observer = new IntersectionObserver(function(entries) {
+    if (entries[0].isIntersecting && dataReady) {
+      var filtered = getFilteredCards();
+      if (page * perPage < filtered.length) {
+        page++;
+        var slice = filtered.slice((page - 1) * perPage, page * perPage);
+        slice.forEach(function(c) { grid.appendChild(createCard(c)); });
+        if (page * perPage >= filtered.length) sentinel.style.display = 'none';
+      }
+    }
+  }, { rootMargin: '200px' });
+  observer.observe(sentinel);
+
+  // ── Card detail modal ───────────────────────────
+  function openModal(card) {
+    var isFoil = (card.finish || '').toLowerCase() === 'foil';
+    document.getElementById('modalImg').innerHTML = '<img src="' + (card.image_url || '') + '" alt="' + card.name + '" onerror="this.style.display=\'none\'">';
+    document.getElementById('modalDetails').innerHTML =
+      '<h2>' + card.name + '</h2>' +
+      '<div class="price-big">' + fmtPrice(card.price) + '</div>' +
+      '<div class="detail-row"><span class="detail-label">Expansion</span><span class="detail-value">' + card.expansion + '</span></div>' +
+      '<div class="detail-row"><span class="detail-label">Rarity</span><span class="detail-value">' + (card.rarity || 'Unknown') + '</span></div>' +
+      '<div class="detail-row"><span class="detail-label">Finish</span><span class="detail-value">' + card.finish + (isFoil ? ' &#10024;' : '') + '</span></div>' +
+      (card.art_link ? '<a class="tcg-link" href="' + card.art_link + '" target="_blank" rel="noopener">View on TCGPlayer</a>' : '');
+
+    modalBackdrop.classList.add('open');
+    document.body.style.overflow = 'hidden';
+
+    // Look up history from static data
+    var key = card.name + '|' + card.expansion + '|' + card.finish;
+    var prices = HISTORY[key] || null;
+    if (prices) renderChart(HISTORY_LABELS, prices);
+  }
+
+  function closeModal() {
+    modalBackdrop.classList.remove('open');
+    document.body.style.overflow = '';
+    if (priceChart) { priceChart.destroy(); priceChart = null; }
+  }
+
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  modalBackdrop.addEventListener('click', function(e) { if (e.target === modalBackdrop) closeModal(); });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      if (modalBackdrop.classList.contains('open')) closeModal();
+      else if (document.getElementById('deckBackdrop').classList.contains('open')) closeDeck();
+    }
+  });
+
+  function renderChart(labels, prices) {
+    var ctx = document.getElementById('priceChart').getContext('2d');
+    if (priceChart) priceChart.destroy();
+    priceChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: labels, datasets: [{ label: 'Price ($)', data: prices, borderColor: '#c9973e', backgroundColor: 'rgba(201,151,62,0.1)', fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#e0b050', spanGaps: true }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) { return '$' + (ctx.parsed.y != null ? ctx.parsed.y.toFixed(2) : 'N/A'); } } } },
+        scales: {
+          x: { ticks: { color: '#9a8e7e', maxRotation: 45, font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+          y: { ticks: { color: '#9a8e7e', callback: function(v) { return '$' + v.toFixed(2); } }, grid: { color: 'rgba(255,255,255,0.04)' } }
+        }
+      }
+    });
+  }
+
+  // ── Zoom slider ─────────────────────────────────
+  zoomSlider.addEventListener('input', function() {
+    grid.style.setProperty('--card-width', zoomSlider.value + 'px');
+  });
+
+  // ── Deck modal (text paste) ─────────────────────
+  var deckBackdrop = document.getElementById('deckBackdrop');
+  var deckTextInput = document.getElementById('deckTextInput');
+  var deckResults = document.getElementById('deckResults');
+  var deckError = document.getElementById('deckError');
+  var deckLookupBtn = document.getElementById('deckLookup');
+
+  document.getElementById('deckBtn').addEventListener('click', function() {
+    deckBackdrop.classList.add('open');
+    document.body.style.overflow = 'hidden';
+    deckTextInput.focus();
+  });
+
+  function closeDeck() {
+    deckBackdrop.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  document.getElementById('deckClose').addEventListener('click', closeDeck);
+  deckBackdrop.addEventListener('click', function(e) { if (e.target === deckBackdrop) closeDeck(); });
+
+  function normalizeName(name) {
+    var n = name.toLowerCase();
+    n = n.replace(/[\u2019\u2018']/g, '');
+    n = n.replace(/[\u201c\u201d]/g, '');
+    n = n.replace(/-/g, ' ');
+    n = n.replace(/\s+/g, ' ').trim();
+    return n;
+  }
+
+  function matchCardPrice(name, finishPref) {
+    var norm = normalizeName(name);
+    var matches = ALL_CARDS.filter(function(c) { return c._name_norm === norm; });
+    if (finishPref && matches.length > 0) {
+      var pref = matches.filter(function(c) { return c.finish === finishPref; });
+      if (pref.length > 0) matches = pref;
+    }
+    if (matches.length === 0) return { found: false, price: null, expansion: '', finish: '', rarity: '', image_url: '', art_link: '' };
+    var row = matches[0];
+    return { found: true, price: row.price, expansion: row.expansion, finish: row.finish, rarity: row.rarity, image_url: row.image_url, art_link: row.art_link };
+  }
+
+  function parseDeckText(text) {
+    var lines = text.split('\n');
+    var main = [];
+    var side = [];
+    var current = main;
+    var deckName = 'Imported Deck';
+
+    lines.forEach(function(line) {
+      line = line.trim();
+      if (!line) return;
+      if (/^side/i.test(line) || /^sideboard/i.test(line)) { current = side; return; }
+      if (/^(main|spellbook|deck)/i.test(line)) { current = main; return; }
+
+      // Parse "2x Card Name" or "2 Card Name" or just "Card Name"
+      var m = line.match(/^(\d+)\s*[xX]?\s+(.+)$/);
+      if (m) {
+        current.push({ qty: parseInt(m[1]), name: m[2].trim() });
+      } else {
+        current.push({ qty: 1, name: line });
+      }
+    });
+
+    return { name: deckName, main: main, side: side };
+  }
+
+  function renderDeckSection(label, entries) {
+    if (!entries || entries.length === 0) return '';
+    var totalQty = entries.reduce(function(s, e) { return s + e.qty; }, 0);
+    var html = '<div class="deck-section-label">' + label + ' (' + totalQty + ')</div>';
+    html += '<div class="deck-card-grid">';
+    entries.forEach(function(e) {
+      var notFoundCls = e.found ? '' : ' not-found';
+      var unitPrice = e.found ? fmtPrice(e.price) : '';
+      var lineTotal = e.found && e.price ? fmtPrice(e.price * e.qty) : '';
+      html += '<div class="deck-card' + notFoundCls + '">' +
+        '<div class="deck-card-img">' +
+          (e.image_url ? '<img src="' + e.image_url + '" alt="' + e.name + '" loading="lazy" onerror="this.style.display=\'none\'">' : '') +
+        '</div>' +
+        '<div class="deck-card-info">' +
+          '<div class="deck-card-name">' + e.name + '</div>' +
+          '<div class="deck-card-qty">x' + e.qty + '</div>' +
+          (e.found
+            ? '<div class="deck-card-price">' + unitPrice + (e.qty > 1 ? ' / ' + lineTotal : '') + '</div>'
+            : '<div class="deck-card-notfound">Not found</div>'
+          ) +
+        '</div></div>';
+    });
+    html += '</div>';
+    return html;
+  }
+
+  deckLookupBtn.addEventListener('click', function() {
+    var text = deckTextInput.value.trim();
+    if (!text) return;
+    deckError.textContent = '';
+
+    var finishPref = finishFilter.value || 'Standard';
+    var parsed = parseDeckText(text);
+
+    var mainEntries = parsed.main.map(function(e) {
+      var info = matchCardPrice(e.name, finishPref);
+      return Object.assign({ qty: e.qty, name: e.name }, info);
+    });
+    var sideEntries = parsed.side.map(function(e) {
+      var info = matchCardPrice(e.name, finishPref);
+      return Object.assign({ qty: e.qty, name: e.name }, info);
+    });
+
+    var allPriced = mainEntries.concat(sideEntries);
+    var totalPrice = allPriced.reduce(function(sum, e) {
+      return sum + (e.found && e.price ? e.price * e.qty : 0);
+    }, 0);
+
+    var html = '<div class="deck-name-bar">' +
+      '<span class="deck-title">' + parsed.name + '</span>' +
+      '<span class="deck-total">' + fmtPrice(totalPrice) + '</span>' +
+    '</div>';
+
+    html += renderDeckSection('Spellbook', mainEntries);
+    if (sideEntries.length > 0) html += renderDeckSection('Sideboard', sideEntries);
+
+    deckResults.innerHTML = html;
+  });
+
+})();
+</script>
+</body>
+</html>
+'''
+
+
+if __name__ == "__main__":
+    main()
