@@ -21,6 +21,9 @@ from colors import bold, dim, success, error, cyan
 SORCERY_API_URL = "https://api.sorcerytcg.com/api/cards"
 TCGCSV_BASE = "https://tcgcsv.com/tcgplayer/77"
 
+session = requests.Session()
+session.headers["User-Agent"] = "Lord-of-Greed-Scraper/1.0"
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -63,7 +66,7 @@ def strip_foil_suffix(name: str) -> str:
 def fetch_sorcery_lookup() -> dict:
     """Build lookup: (norm_name, norm_set, finish_lower) → {slug, rarity, artist}."""
     print(cyan("Fetching Sorcery API card data…"))
-    resp = requests.get(SORCERY_API_URL, timeout=60)
+    resp = session.get(SORCERY_API_URL, timeout=60)
     resp.raise_for_status()
     cards = resp.json()
     print(f"  {bold(str(len(cards)))} cards returned")
@@ -92,7 +95,7 @@ def fetch_sorcery_lookup() -> dict:
 def fetch_groups() -> list[dict]:
     """Fetch all Sorcery TCG groups (expansions) from TCGCSV."""
     print(cyan("Fetching TCGCSV groups…"))
-    resp = requests.get(f"{TCGCSV_BASE}/groups", timeout=30)
+    resp = session.get(f"{TCGCSV_BASE}/groups", timeout=30)
     resp.raise_for_status()
     groups = resp.json().get("results", [])
     for g in groups:
@@ -102,11 +105,11 @@ def fetch_groups() -> list[dict]:
 
 def fetch_group_products_and_prices(group_id: int, group_name: str):
     """Fetch products + prices for one group. Returns (name, products, prices)."""
-    prod_resp = requests.get(f"{TCGCSV_BASE}/{group_id}/products", timeout=60)
+    prod_resp = session.get(f"{TCGCSV_BASE}/{group_id}/products", timeout=60)
     prod_resp.raise_for_status()
     products = prod_resp.json().get("results", [])
 
-    price_resp = requests.get(f"{TCGCSV_BASE}/{group_id}/prices", timeout=60)
+    price_resp = session.get(f"{TCGCSV_BASE}/{group_id}/prices", timeout=60)
     price_resp.raise_for_status()
     prices = price_resp.json().get("results", [])
 
